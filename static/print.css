@@ -1,0 +1,122 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #172033;
+  background: #e7eaf0;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body { background: #e7eaf0; color: #172033; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+.print-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  min-height: 66px;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  color: #f3f5fa;
+  background: #111722;
+  box-shadow: 0 4px 20px rgba(17, 23, 34, .22);
+}
+
+.print-toolbar > div { min-width: 0; display: grid; gap: 3px; }
+.print-toolbar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.print-toolbar span { color: #aab3c2; font-size: 11px; }
+.print-toolbar button {
+  min-height: 38px;
+  padding: 0 15px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #6559a5;
+  border-radius: 8px;
+  color: #fff;
+  background: #6656d9;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.print-toolbar button:disabled { opacity: .48; cursor: wait; }
+.print-toolbar button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+.print-document { padding: 24px 0 48px; }
+.print-page {
+  width: 210mm;
+  min-height: 297mm;
+  margin: 0 auto 24px;
+  padding: 16mm 16mm 18mm;
+  background: #fff;
+  box-shadow: 0 12px 40px rgba(30, 38, 52, .16);
+}
+
+.source-page-header {
+  margin-bottom: 9mm;
+  padding-bottom: 3mm;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: .25mm solid #d9dde5;
+  color: #687286;
+  font-size: 8.5pt;
+}
+.source-page-header span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; color: #344056; }
+.source-page-header span:last-child { flex: 0 0 auto; }
+
+.prose { color: #172033; font-size: 10.5pt; line-height: 1.55; overflow-wrap: break-word; }
+.prose > :first-child { margin-top: 0; }
+.prose > :last-child { margin-bottom: 0; }
+.prose h1, .prose h2, .prose h3 { margin: 1.15em 0 .5em; line-height: 1.25; color: #111827; break-after: avoid-page; }
+.prose h1 { font-size: 20pt; }
+.prose h2 { font-size: 15pt; }
+.prose h3 { font-size: 12pt; }
+.prose p, .prose ul, .prose ol, .prose blockquote { orphans: 3; widows: 3; }
+.prose a { color: #245a9a; text-decoration: underline; }
+.prose table { width: 100%; margin: 1em 0; border-collapse: collapse; table-layout: auto; font-size: 9pt; break-inside: auto; }
+.prose thead { display: table-header-group; }
+.prose tr { break-inside: avoid-page; }
+.prose th, .prose td { padding: 2.2mm 2.5mm; border: .2mm solid #c9ced8; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.prose th { color: #172033; background: #edf0f5; font-weight: 700; }
+.prose .katex-display { max-width: 100%; margin: 1.2em 0; padding: 2mm 0; overflow: visible; break-inside: avoid-page; }
+.prose .katex-display > .katex { display: block; max-width: 100%; text-align: center; transform-origin: left center; }
+.prose pre { margin: 1em 0; padding: 3mm; border: .2mm solid #d6dae2; border-radius: 2mm; background: #f5f6f8; white-space: pre-wrap; overflow-wrap: anywhere; break-inside: avoid-page; }
+.prose code { color: #7b341e; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: .92em; }
+.prose img { display: block; max-width: 100%; max-height: 235mm; width: auto; height: auto; margin: 5mm auto; object-fit: contain; break-inside: avoid-page; }
+.prose blockquote { margin-left: 0; padding-left: 4mm; border-left: 1mm solid #8172dc; color: #4b5568; }
+.prose hr { margin: 8mm 0; border: 0; border-top: .25mm solid #d5d9e1; }
+
+.missing-page { min-height: 220mm; display: grid; align-content: center; justify-items: center; text-align: center; color: #687286; }
+.missing-page h1 { margin: 0 0 8px; color: #303a4d; font-size: 18pt; }
+.missing-page p { margin: 0; max-width: 420px; font-size: 10pt; line-height: 1.55; }
+
+@page { size: A4 portrait; margin: 16mm; }
+
+@media print {
+  html, body { min-height: 0; background: #fff; }
+  .print-toolbar { display: none !important; }
+  .print-document { padding: 0; }
+  .print-page {
+    width: auto;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+    break-after: page;
+  }
+  .print-page:last-child { break-after: auto; }
+  .source-page-header { margin-bottom: 7mm; }
+  .missing-page { min-height: 240mm; }
+}
+
+@media screen and (max-width: 860px) {
+  .print-toolbar { position: static; align-items: stretch; flex-direction: column; gap: 10px; }
+  .print-toolbar button { justify-content: center; }
+  .print-document { padding: 14px; overflow-x: auto; }
+  .print-page { margin-bottom: 14px; }
+}

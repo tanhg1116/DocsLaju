@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0d12">
+  <title>DocsLaju OCR Workspace</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="icon-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="icon-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+    <symbol id="icon-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="icon-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></symbol>
+    <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="m12 5 7 7-7 7M5 12h14"/></symbol>
+    <symbol id="icon-panel-left-close" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18M16 9l-3 3 3 3"/></symbol>
+    <symbol id="icon-panel-left-open" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18M13 9l3 3-3 3"/></symbol>
+    <symbol id="icon-file-text" viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13h8M8 17h8M8 9h2"/></symbol>
+    <symbol id="icon-file-image" viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><circle cx="10" cy="13" r="2"/><path d="m20 17-1.1-1.1a2 2 0 0 0-2.8 0L12 20"/></symbol>
+    <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2.1 12a10.7 10.7 0 0 1 19.8 0 10.7 10.7 0 0 1-19.8 0Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="icon-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6M14.5 4l-5 16"/></symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+    <symbol id="icon-archive" viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/></symbol>
+    <symbol id="icon-sparkles" viewBox="0 0 24 24"><path d="m12 3-1.5 4.5L6 9l4.5 1.5L12 15l1.5-4.5L18 9l-4.5-1.5L12 3ZM5 16l-.75 2.25L2 19l2.25.75L5 22l.75-2.25L8 19l-2.25-.75L5 16Zm14-2-1 3-3 1 3 1 1 3 1-3 3-1-3-1-1-3Z"/></symbol>
+    <symbol id="icon-pencil" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></symbol>
+    <symbol id="icon-pin" viewBox="0 0 24 24"><path d="M12 17v5M5 17h14M6 3h12l-2 8 3 3H5l3-3Z"/></symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v6M14 11v6"/></symbol>
+    <symbol id="icon-more-horizontal" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m20 6-11 11-5-5"/></symbol>
+    <symbol id="icon-scan-text" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8h8"/><path d="M7 12h10"/><path d="M7 16h6"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+    <symbol id="icon-printer" viewBox="0 0 24 24"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0 2 5M20 4v7h-7"/></symbol>
+  </svg>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand-row">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">DL</div>
+          <div>
+            <strong>DocsLaju</strong>
+            <span>Document intelligence</span>
+          </div>
+        </div>
+        <div class="sidebar-window-actions">
+          <button class="sidebar-toggle icon-tooltip" id="toggleSidebar" aria-label="Minimize sidebar" data-tooltip="Minimize sidebar"><svg class="ui-icon"><use href="#icon-panel-left-close"></use></svg></button>
+          <button class="icon-button mobile-close icon-tooltip" id="closeSidebar" aria-label="Close sidebar" data-tooltip="Close sidebar"><svg class="ui-icon"><use href="#icon-x"></use></svg></button>
+        </div>
+      </div>
+
+      <div class="admin-card">
+        <span class="admin-avatar" id="adminAvatar">A</span>
+        <span class="admin-copy">
+          <strong id="adminName">Admin User</strong>
+          <small>Local admin workspace</small>
+        </span>
+        <span class="admin-role">Admin</span>
+      </div>
+
+      <button class="new-session-button" id="newSessionButton">
+        <span class="new-session-icon" aria-hidden="true"><svg class="ui-icon"><use href="#icon-plus"></use></svg></span>
+        <span>New OCR session</span>
+        <kbd>N</kbd>
+      </button>
+
+      <div class="sidebar-scroll">
+        <section class="sidebar-section">
+          <div class="sidebar-section-heading">
+            <span>Projects</span>
+            <button class="sidebar-add-button icon-tooltip" id="newProjectButton" aria-label="Create project" data-tooltip="Create project folder"><svg class="ui-icon"><use href="#icon-plus"></use></svg></button>
+          </div>
+          <nav class="project-list" id="projectList" aria-label="Project folders"></nav>
+        </section>
+
+        <section class="sidebar-section">
+          <div class="sidebar-section-heading drop-heading" id="unfiledDropZone">
+            <span>Unfiled sessions</span>
+            <span class="section-count" id="unfiledCount">0</span>
+          </div>
+          <nav class="session-list" id="sessionList" aria-label="Unfiled OCR sessions"></nav>
+        </section>
+
+        <section class="sidebar-section archived-section">
+          <button class="archive-toggle" id="archiveToggle" aria-expanded="false">
+            <span><svg class="ui-icon" aria-hidden="true"><use href="#icon-archive"></use></svg> Archived</span>
+            <span class="section-count" id="archivedCount">0</span>
+          </button>
+          <nav class="session-list archived-list" id="archivedSessionList" aria-label="Archived sessions" hidden></nav>
+        </section>
+      </div>
+
+      <div class="sidebar-footer">
+        <span class="status-dot"></span>
+        <span>OCR service ready</span>
+        <code id="modelName">mistral-ocr-latest</code>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-button mobile-menu" id="openSidebar" aria-label="Open sessions"><svg class="ui-icon"><use href="#icon-menu"></use></svg></button>
+        <div class="workspace-heading">
+          <p class="eyebrow">OCR workspace</p>
+          <div class="session-document-line">
+            <h1 id="sessionTitle">Session 1</h1>
+            <span class="header-arrow" aria-hidden="true"><svg class="ui-icon"><use href="#icon-chevron-right"></use></svg></span>
+            <div class="document-picker" id="documentPicker">
+              <button class="document-picker-button" id="documentPickerButton" type="button" aria-haspopup="menu" aria-expanded="false" disabled>
+                <span id="activeFileName">No uploaded documents</span>
+                <svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron-down"></use></svg>
+              </button>
+              <div class="document-menu" id="documentMenu" role="menu" hidden>
+                <div id="documentList"></div>
+              </div>
+            </div>
+            <button class="header-upload-button icon-tooltip" id="uploadButton" aria-label="Upload another document" data-tooltip="Upload another document"><svg class="ui-icon"><use href="#icon-plus"></use></svg></button>
+            <button class="header-export-button icon-tooltip" id="exportButton" aria-label="Export document as PDF" data-tooltip="Export document as PDF" disabled><svg class="ui-icon"><use href="#icon-printer"></use></svg></button>
+          </div>
+          <span class="file-status" id="fileStatus">No document selected</span>
+        </div>
+        <div class="topbar-actions">
+          <span class="save-state" id="saveState">Ready</span>
+        </div>
+      </header>
+
+      <section class="workspace-grid" id="workspaceGrid">
+        <article class="pane pane-document">
+          <div class="pane-title">
+            <div>
+              <span class="pane-icon purple"><svg class="ui-icon"><use href="#icon-file-text"></use></svg></span>
+              <div>
+                <h2>Document</h2>
+                <p id="documentMeta">Original page</p>
+              </div>
+            </div>
+            <div class="document-title-actions">
+              <button class="document-ocr-button icon-tooltip" id="ocrButton" aria-label="Run OCR on this page" data-tooltip="Run OCR on this page" disabled><svg class="ui-icon"><use href="#icon-scan-text"></use></svg></button>
+              <label class="auto-ocr-toggle icon-tooltip" id="autoOcrControl" data-tooltip="Automatic OCR is off">
+                <input id="autoOcrToggle" type="checkbox" role="switch" aria-label="Automatic OCR for all pages" disabled>
+                <span class="auto-ocr-track" aria-hidden="true"><span></span></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="preview-toolbar" id="previewToolbar" hidden>
+            <div class="view-mode" role="group" aria-label="Page sizing">
+              <button class="viewer-button active" id="fitPageButton" title="Fit the whole page">Fit page</button>
+              <button class="viewer-button" id="fitWidthButton" title="Fit the page width">Fit width</button>
+            </div>
+            <div class="zoom-controls" role="group" aria-label="Preview zoom">
+              <button class="viewer-button square" id="zoomOutButton" aria-label="Zoom out"><svg class="ui-icon"><use href="#icon-minus"></use></svg></button>
+              <button class="zoom-level" id="zoomLevel" title="Reset to fit page">Auto</button>
+              <button class="viewer-button square" id="zoomInButton" aria-label="Zoom in"><svg class="ui-icon"><use href="#icon-plus"></use></svg></button>
+            </div>
+          </div>
+
+          <div class="document-stage" id="documentStage">
+            <div class="drop-overlay" id="dropOverlay" aria-hidden="true">
+              <span class="drop-overlay-icon"><svg class="ui-icon"><use href="#icon-upload"></use></svg></span>
+              <strong>Drop PDF or image here</strong>
+              <small>The file will be added to this session</small>
+            </div>
+            <div class="empty-state" id="documentEmpty">
+              <div class="empty-icon"><svg class="ui-icon"><use href="#icon-upload"></use></svg></div>
+              <h3>Bring in a document</h3>
+              <p>Upload a PDF or image to start extracting clean Markdown.</p>
+              <button class="button button-primary" id="emptyUploadButton">Choose a file</button>
+              <small>PDF, PNG, JPG or WEBP · up to 30 MB</small>
+            </div>
+            <div class="preview-canvas" id="previewCanvas" hidden>
+              <img id="documentPreview" alt="Original document page preview" draggable="false">
+              <iframe id="pdfViewer" title="Original PDF document viewer" hidden></iframe>
+            </div>
+          </div>
+
+        </article>
+
+        <article class="pane pane-rendered">
+          <div class="pane-title">
+            <div>
+              <span class="pane-icon blue"><svg class="ui-icon"><use href="#icon-eye"></use></svg></span>
+              <div>
+                <h2>Rendered Markdown</h2>
+                <p>Live compiled preview</p>
+              </div>
+            </div>
+            <span class="badge" id="ocrBadge">Waiting</span>
+          </div>
+
+          <div class="rendered-stack">
+            <div class="rendered-content prose" id="renderedContent">
+              <div class="empty-state compact">
+                <div class="empty-icon"><svg class="ui-icon"><use href="#icon-sparkles"></use></svg></div>
+                <h3>Your result will appear here</h3>
+                <p>The formatted preview updates as you edit the raw Markdown.</p>
+              </div>
+            </div>
+            <div class="rendered-loading" id="renderedLoading" role="status" aria-live="polite" hidden>
+              <span class="loading-spinner" aria-hidden="true"></span>
+              <span id="renderedLoadingLabel">Reading page…</span>
+            </div>
+          </div>
+
+          <div class="page-controls middle-page-controls" id="pageControls" hidden>
+            <button class="icon-button icon-tooltip" id="previousPage" aria-label="Previous page" data-tooltip="Previous page"><svg class="ui-icon"><use href="#icon-arrow-left"></use></svg></button>
+            <label>Page <input id="pageNumber" type="number" min="1" value="1"> <span id="pageCount">of 1</span></label>
+            <button class="icon-button icon-tooltip" id="nextPage" aria-label="Next page" data-tooltip="Next page"><svg class="ui-icon"><use href="#icon-arrow-right"></use></svg></button>
+          </div>
+
+          <div class="batch-status-area" id="batchStatusArea" hidden>
+            <div class="batch-progress" id="batchProgress" hidden>
+              <div><span id="batchProgressLabel">Preparing all pages…</span><strong id="batchProgressCount">0 / 0</strong></div>
+              <div class="batch-progress-track"><span id="batchProgressBar"></span></div>
+            </div>
+          </div>
+        </article>
+
+        <article class="pane pane-editor">
+          <div class="pane-title">
+            <div>
+              <span class="pane-icon amber"><svg class="ui-icon"><use href="#icon-code"></use></svg></span>
+              <div>
+                <h2>Raw Markdown</h2>
+                <p>Edit the OCR output directly</p>
+              </div>
+            </div>
+            <span class="word-count" id="wordCount">0 words</span>
+          </div>
+
+          <textarea id="markdownEditor" spellcheck="false" aria-label="Raw Markdown editor" placeholder="OCR output will appear here…" disabled></textarea>
+
+          <div class="pane-actions editor-actions">
+            <button class="button button-quiet" id="copyButton" disabled>Copy</button>
+            <span class="keyboard-hint">Changes save automatically</span>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <input id="fileInput" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" hidden>
+  <div class="scrim" id="scrim"></div>
+  <div class="context-menu" id="sessionMenu" role="menu" hidden>
+    <button role="menuitem" data-session-action="rename"><svg class="ui-icon" aria-hidden="true"><use href="#icon-pencil"></use></svg><span>Rename</span></button>
+    <button role="menuitem" data-session-action="pin"><svg class="ui-icon" aria-hidden="true"><use href="#icon-pin"></use></svg><span id="pinActionLabel">Pin session</span></button>
+    <button role="menuitem" data-session-action="move"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg><span>Add to project</span><svg class="ui-icon menu-chevron" aria-hidden="true"><use href="#icon-chevron-right"></use></svg></button>
+    <div class="project-picker" id="projectPicker" hidden></div>
+    <button role="menuitem" data-session-action="archive"><svg class="ui-icon" aria-hidden="true"><use href="#icon-archive"></use></svg><span id="archiveActionLabel">Archive</span></button>
+    <div class="menu-separator"></div>
+    <button class="danger" role="menuitem" data-session-action="delete"><svg class="ui-icon" aria-hidden="true"><use href="#icon-trash"></use></svg><span>Delete session</span></button>
+  </div>
+  <div class="context-menu" id="projectMenu" role="menu" hidden>
+    <button role="menuitem" data-project-action="new-session"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg><span>New session here</span></button>
+    <button role="menuitem" data-project-action="rename"><svg class="ui-icon" aria-hidden="true"><use href="#icon-pencil"></use></svg><span>Rename project</span></button>
+    <div class="menu-separator"></div>
+    <button class="danger" role="menuitem" data-project-action="delete"><svg class="ui-icon" aria-hidden="true"><use href="#icon-trash"></use></svg><span>Delete project</span></button>
+  </div>
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+
+  <script src="{{ url_for('static', filename='vendor/katex/katex.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/katex/contrib/auto-render.min.js') }}"></script>
+  <script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

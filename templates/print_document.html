@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Print {{ document.name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='print.css') }}">
+</head>
+<body data-auto-print="{{ 'true' if auto_print else 'false' }}">
+  <header class="print-toolbar" aria-label="PDF export controls">
+    <div>
+      <strong>{{ document.name }}</strong>
+      <span id="printStatus" role="status" aria-live="polite">Preparing the printable document...</span>
+    </div>
+    <button id="printButton" type="button" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/>
+      </svg>
+      Print or save as PDF
+    </button>
+  </header>
+
+  <main class="print-document" id="printDocument">
+    {% for page in pages %}
+      <article class="print-page{% if not page.has_ocr %} print-page-empty{% endif %}" data-source-page="{{ page.number }}">
+        <header class="source-page-header">
+          <span>{{ document.name }}</span>
+          <span>Source page {{ page.number }} of {{ document.num_pages }}</span>
+        </header>
+        {% if page.has_ocr %}
+          <section class="prose">{{ page.html | safe }}</section>
+        {% else %}
+          <section class="missing-page">
+            <h1>Page {{ page.number }} has no OCR output</h1>
+            <p>Run OCR for this page before exporting to include its rendered content.</p>
+          </section>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </main>
+
+  <script src="{{ url_for('static', filename='vendor/katex/katex.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/katex/contrib/auto-render.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='print_document.js') }}"></script>
+</body>
+</html>
