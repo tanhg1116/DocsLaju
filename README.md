@@ -2,7 +2,7 @@
 
 A Flask-based document OCR workspace powered by Mistral. Upload PDFs or images, compare the original page with rendered Markdown, and edit the raw OCR result in a focused three-pane interface.
 
-![Previous Streamlit interface](Example.jpg)
+![DocsLaju OCR workspace showing a receipt with rendered and raw Markdown](docs/assets/receipt-demo.jpg)
 
 ## Flask draft
 
