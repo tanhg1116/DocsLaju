@@ -18,7 +18,7 @@ This branch transitions the UI from Streamlit to a custom Flask frontend while p
 - Collapsible sidebar with the preference retained in the browser
 - Header document picker with per-document deletion and an adjacent upload button
 - Drag-and-drop PDF/image upload directly onto the preview pane
-- Non-blocking automatic OCR toggle with progress and immediate queue cancellation
+- Non-blocking automatic OCR toggle with a configurable page range, progress, and immediate queue cancellation
 - SQLite persistence for sessions, uploads, and per-page OCR edits
 - Per-page OCR and editing with `mistral-ocr-latest`
 - Browser-native PDF export containing every rendered OCR page and extracted image
@@ -109,13 +109,16 @@ The complete database repository tree and relationship diagram are in
   Markdown workflows.
 - Deleting a project moves its sessions to **Unfiled**. Deleting a session also
   deletes its stored documents and OCR pages.
-- The automatic-OCR worker processes its queue outside the Flask request, allowing
-  page navigation and the rest of the UI to remain responsive. Switching the
-  toggle off cancels queued pages immediately; if Mistral is already processing a
-  page, its returned result is discarded.
+- Switching on automatic OCR opens a page-range dialog. The full document is
+  selected by default, while individual pages and comma-separated ranges such as
+  `1-3, 5, 8-10` are also supported. The worker processes the selected queue
+  outside the Flask request, allowing page navigation and the rest of the UI to
+  remain responsive. Switching the toggle off cancels queued pages immediately;
+  if Mistral is already processing a page, its returned result is discarded.
 - Triggering current-page OCR while automatic OCR is active promotes that page to
-  the front of the persistent queue. A page already sent to Mistral finishes first,
-  then the promoted page runs next.
+  the front of the persistent queue, adding it even when it was outside the chosen
+  range. A page already sent to Mistral finishes first, then the promoted page runs
+  next.
 - SQLite page claims prevent manual and batch requests from processing the same
   document page concurrently.
 - Deleting a document cascades to all of its extracted asset rows.

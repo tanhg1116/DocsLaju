@@ -476,17 +476,39 @@ def run_ocr(session_id: str, file_id: str, page_number: int) -> Response:
 
 @app.post("/api/sessions/<session_id>/files/<file_id>/ocr-all")
 def run_all_ocr(session_id: str, file_id: str) -> tuple[Response, int]:
-    _document(session_id, file_id)
+    document = _document(session_id, file_id)
     existing = _db().get_active_ocr_job(ADMIN_USER_ID, file_id)
     if existing:
         return jsonify(existing), 202
-    force = bool((request.get_json(silent=True) or {}).get("force"))
+    payload = request.get_json(silent=True) or {}
+    force = bool(payload.get("force"))
+    page_range = str(payload.get("page_range", "all")).strip().lower()
+    if not page_range or page_range in {"all", "*"}:
+        page_numbers = list(range(1, int(document["num_pages"]) + 1))
+    else:
+        page_numbers_set: set[int] = set()
+        for part in page_range.split(","):
+            part = part.strip()
+            match = re.fullmatch(r"(\d+)\s*(?:-\s*(\d+))?", part)
+            if not match:
+                raise BadRequest("Use page ranges such as 1-3, 5, 8-10")
+            start = int(match.group(1))
+            end = int(match.group(2) or start)
+            if start > end:
+                start, end = end, start
+            if start < 1 or end > int(document["num_pages"]):
+                raise BadRequest(f"Pages must be between 1 and {document['num_pages']}")
+            page_numbers_set.update(range(start, end + 1))
+        page_numbers = sorted(page_numbers_set)
+        if not page_numbers:
+            raise BadRequest("Select at least one page")
     try:
         job_id = _db().create_ocr_job(
             ADMIN_USER_ID,
             session_id,
             file_id,
             force=force,
+            page_numbers=page_numbers,
         )
     except sqlite3.IntegrityError as exc:
         raise Conflict("An OCR-all-pages job is already active for this document") from exc

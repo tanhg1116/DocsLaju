@@ -141,9 +141,8 @@
               </div>
             </div>
             <div class="document-title-actions">
-              <button class="document-ocr-button icon-tooltip" id="ocrButton" aria-label="Run OCR on this page" data-tooltip="Run OCR on this page" disabled><svg class="ui-icon"><use href="#icon-scan-text"></use></svg></button>
               <label class="auto-ocr-toggle icon-tooltip" id="autoOcrControl" data-tooltip="Automatic OCR is off">
-                <input id="autoOcrToggle" type="checkbox" role="switch" aria-label="Automatic OCR for all pages" disabled>
+                <input id="autoOcrToggle" type="checkbox" role="switch" aria-label="Automatic OCR for selected pages" disabled>
                 <span class="auto-ocr-track" aria-hidden="true"><span></span></span>
               </label>
             </div>
@@ -191,7 +190,10 @@
                 <p>Live compiled preview</p>
               </div>
             </div>
-            <span class="badge" id="ocrBadge">Waiting</span>
+            <div class="rendered-title-actions">
+              <button class="document-ocr-button icon-tooltip" id="ocrButton" aria-label="Run OCR on this page" data-tooltip="Run OCR on this page" disabled><svg class="ui-icon"><use href="#icon-scan-text"></use></svg></button>
+              <span class="badge" id="ocrBadge">Waiting</span>
+            </div>
           </div>
 
           <div class="rendered-stack">
@@ -216,7 +218,7 @@
 
           <div class="batch-status-area" id="batchStatusArea" hidden>
             <div class="batch-progress" id="batchProgress" hidden>
-              <div><span id="batchProgressLabel">Preparing all pages…</span><strong id="batchProgressCount">0 / 0</strong></div>
+              <div><span id="batchProgressLabel">Preparing selected pages…</span><strong id="batchProgressCount">0 / 0</strong></div>
               <div class="batch-progress-track"><span id="batchProgressBar"></span></div>
             </div>
           </div>
@@ -244,6 +246,32 @@
       </section>
     </main>
   </div>
+
+  <dialog class="auto-ocr-dialog" id="autoOcrDialog" aria-labelledby="autoOcrDialogTitle">
+    <form id="autoOcrForm" method="dialog" novalidate>
+      <div class="auto-ocr-dialog-header">
+        <span class="auto-ocr-dialog-icon" aria-hidden="true"><svg class="ui-icon"><use href="#icon-scan-text"></use></svg></span>
+        <div>
+          <h2 id="autoOcrDialogTitle">Choose pages for automatic OCR</h2>
+          <p id="autoOcrDocumentLabel">Process the entire document or enter a custom range.</p>
+        </div>
+      </div>
+      <label class="auto-ocr-range-field" for="autoOcrRange">
+        <span>Page range</span>
+        <input id="autoOcrRange" type="text" inputmode="numeric" autocomplete="off" placeholder="1-3, 5, 8-10" aria-describedby="autoOcrRangeHelp autoOcrRangeStatus">
+      </label>
+      <p class="auto-ocr-range-help" id="autoOcrRangeHelp">Use commas between pages or ranges. Pages with existing OCR are skipped.</p>
+      <div class="auto-ocr-range-presets" aria-label="Page range presets">
+        <button type="button" id="autoOcrAllPages">All pages</button>
+        <button type="button" id="autoOcrCurrentPage">Current page</button>
+      </div>
+      <p class="auto-ocr-range-status" id="autoOcrRangeStatus" role="status"></p>
+      <div class="auto-ocr-dialog-actions">
+        <button class="button button-quiet" id="autoOcrCancel" type="button">Cancel</button>
+        <button class="button button-primary" id="autoOcrStart" type="submit">Start automatic OCR</button>
+      </div>
+    </form>
+  </dialog>
 
   <input id="fileInput" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" hidden>
   <div class="scrim" id="scrim"></div>

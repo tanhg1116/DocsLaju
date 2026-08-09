@@ -576,8 +576,17 @@ class Database:
         document_id: str,
         *,
         force: bool = False,
+        page_numbers: list[int] | None = None,
     ) -> str:
         document = self.get_document(user_id, session_id, document_id)
+        requested_pages = (
+            page_numbers
+            if page_numbers is not None
+            else range(1, int(document["num_pages"]) + 1)
+        )
+        selected_pages = sorted(set(requested_pages))
+        if not selected_pages or selected_pages[0] < 1 or selected_pages[-1] > int(document["num_pages"]):
+            raise ValueError("OCR job pages are outside this document")
         job_id = self._id()
         with self.transaction() as connection:
             connection.execute(
@@ -605,7 +614,7 @@ class Database:
                         "completed" if page_number in completed else "queued",
                         None,
                     )
-                    for page_number in range(1, int(document["num_pages"]) + 1)
+                    for page_number in selected_pages
                 ],
             )
             if completed:
@@ -713,20 +722,29 @@ class Database:
         with self.transaction() as connection:
             job = connection.execute(
                 """
-                SELECT id FROM ocr_jobs
-                WHERE id = ? AND user_id = ? AND status IN ('queued', 'running')
+                SELECT j.id, d.num_pages FROM ocr_jobs j
+                JOIN documents d ON d.id = j.document_id
+                WHERE j.id = ? AND j.user_id = ? AND j.status IN ('queued', 'running')
                 """,
                 (job_id, user_id),
             ).fetchone()
             if not job:
                 raise ValueError("Automatic OCR is no longer running")
+            if page_number < 1 or page_number > int(job["num_pages"]):
+                raise ValueError("Page is outside this document")
             page = connection.execute(
                 "SELECT status FROM ocr_job_pages WHERE job_id = ? AND page_number = ?",
                 (job_id, page_number),
             ).fetchone()
             if not page:
-                raise KeyError("OCR job page not found")
-            if page["status"] != "running":
+                connection.execute(
+                    """
+                    INSERT INTO ocr_job_pages (job_id, page_number, priority, status)
+                    VALUES (?, ?, 1000, 'queued')
+                    """,
+                    (job_id, page_number),
+                )
+            elif page["status"] != "running":
                 connection.execute(
                     """
                     UPDATE ocr_job_pages

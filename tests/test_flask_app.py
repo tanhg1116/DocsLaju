@@ -116,6 +116,8 @@ def test_sidebar_exposes_projects_and_complete_session_menu():
             b'id="documentPickerButton"',
             b'id="autoOcrToggle"',
             b'id="autoOcrControl"',
+            b'id="autoOcrDialog"',
+            b'id="autoOcrRange"',
             b'id="dropOverlay"',
         ):
             assert marker in page.data
@@ -126,6 +128,7 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
     with app.test_client() as client:
         page = client.get("/")
         script = client.get("/static/app.js")
+        css = client.get("/static/app.css")
 
         for icon_id in (
             b'id="icon-panel-left-close"',
@@ -138,9 +141,16 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         assert b'data-tooltip="Run OCR on this page"' in page.data
         assert b'data-tooltip="Export document as PDF"' in page.data
         assert b'class="auto-ocr-track"' in page.data
-        assert b'class="middle-icon-actions"' not in page.data
+        assert b'class="rendered-title-actions"' in page.data
         assert b"function iconMarkup" in script.data
         assert b"function setIconButton" in script.data
+        assert b"function formatNumberedEquations" in script.data
+        assert b"formatNumberedEquations(ui.renderedContent)" in script.data
+        assert b"function normalizeRenderedLists" in script.data
+        assert b"normalizeRenderedLists(ui.renderedContent)" in script.data
+        assert b"function formatLetteredSubparts" in script.data
+        assert b".prose .numbered-equation" in css.data
+        assert b".prose .exercise-subparts" in css.data
 
         for old_glyph in ("‹", "×", "☰", "▤", "◇", "⌁", "✎", "⌖", "▰", "▣", "⌫", "⋯", "◆"):
             assert old_glyph.encode() not in page.data
@@ -168,7 +178,9 @@ def test_ocr_and_export_controls_are_in_the_requested_headers():
         current_page_ocr = markup.index('id="ocrButton"')
         automatic_toggle = markup.index('id="autoOcrToggle"')
         assert topbar < upload < export < workspace
-        assert left < current_page_ocr < automatic_toggle < middle
+        right = markup.index('class="pane pane-editor"')
+        assert left < automatic_toggle < middle
+        assert middle < current_page_ocr < right
 
 
 def test_document_delete_removes_content_and_selects_a_replacement(isolated_database: Path):
@@ -450,6 +462,56 @@ def test_ocr_all_processes_every_pdf_page_without_blocking_request(monkeypatch):
         ] == ["# Page 1", "# Page 2", "# Page 3"]
 
 
+def test_ocr_all_processes_only_the_requested_page_range(monkeypatch):
+    processed_pages = []
+
+    def record_inference(_document, page):
+        processed_pages.append(page)
+        return f"# Page {page}"
+
+    monkeypatch.setattr("app._infer_document_page", record_inference)
+    writer = PyPDF2.PdfWriter()
+    for _ in range(5):
+        writer.add_blank_page(width=320, height=480)
+    source = io.BytesIO()
+    writer.write(source)
+
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        document_id = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(source.getvalue()), "selected-pages.pdf")},
+            content_type="multipart/form-data",
+        ).get_json()["active_document"]["id"]
+        queued = client.post(
+            f"/api/sessions/{session_id}/files/{document_id}/ocr-all",
+            json={"page_range": "2, 4-5"},
+        )
+        assert queued.status_code == 202
+        job_id = queued.get_json()["id"]
+
+        deadline = time.monotonic() + 2
+        job = None
+        while time.monotonic() < deadline:
+            job = client.get(f"/api/ocr-jobs/{job_id}").get_json()
+            if job["status"] == "completed":
+                break
+            time.sleep(0.02)
+
+        assert job["status"] == "completed"
+        assert job["total_pages"] == 3
+        assert [page["page_number"] for page in job["pages"]] == [2, 4, 5]
+        assert processed_pages == [2, 4, 5]
+        assert app.extensions["database"].get_page_markdown(document_id, 1) is None
+        assert app.extensions["database"].get_page_markdown(document_id, 3) is None
+
+        invalid = client.post(
+            f"/api/sessions/{session_id}/files/{document_id}/ocr-all",
+            json={"page_range": "1, nope"},
+        )
+        assert invalid.status_code == 400
+
+
 def test_current_page_promotion_jumps_ahead_of_the_automatic_queue(monkeypatch):
     first_page_started = threading.Event()
     release_first_page = threading.Event()
@@ -476,7 +538,10 @@ def test_current_page_promotion_jumps_ahead_of_the_automatic_queue(monkeypatch):
             data={"file": (io.BytesIO(source.getvalue()), "priority.pdf")},
             content_type="multipart/form-data",
         ).get_json()["active_document"]["id"]
-        queued = client.post(f"/api/sessions/{session_id}/files/{document_id}/ocr-all", json={})
+        queued = client.post(
+            f"/api/sessions/{session_id}/files/{document_id}/ocr-all",
+            json={"page_range": "1-2"},
+        )
         job_id = queued.get_json()["id"]
         assert first_page_started.wait(timeout=1)
 
