@@ -38,6 +38,7 @@
     <symbol id="icon-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
     <symbol id="icon-printer" viewBox="0 0 24 24"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z"/></symbol>
     <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0 2 5M20 4v7h-7"/></symbol>
+    <symbol id="icon-user-round" viewBox="0 0 24 24"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></symbol>
   </svg>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
@@ -56,7 +57,7 @@
       </div>
 
       <div class="admin-card">
-        <span class="admin-avatar" id="adminAvatar">A</span>
+        <span class="admin-avatar" id="adminAvatar" aria-hidden="true"><svg class="ui-icon"><use href="#icon-user-round"></use></svg></span>
         <span class="admin-copy">
           <strong id="adminName">Admin User</strong>
           <small>Local admin workspace</small>

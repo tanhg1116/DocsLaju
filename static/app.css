@@ -62,6 +62,7 @@ button { color: inherit; }
 
 .admin-card { margin: 15px 1px 12px; min-height: 54px; padding: 9px; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid #252c39; border-radius: 11px; background: rgba(255,255,255,.025); }
 .admin-avatar { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; color: #dcd7ff; background: #25213d; font-size: 12px; font-weight: 800; }
+.admin-avatar .ui-icon { width: 19px; height: 19px; stroke-width: 1.8; }
 .admin-copy { min-width: 0; }
 .admin-copy strong, .admin-copy small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .admin-copy strong { font-size: 12px; color: #dce0e8; }
@@ -134,8 +135,8 @@ button { color: inherit; }
 .sidebar-collapsed .sidebar-scroll, .sidebar-collapsed .sidebar-footer,
 .sidebar-collapsed .new-session-button > span:last-of-type, .sidebar-collapsed .new-session-button kbd { display: none; }
 .sidebar-collapsed .sidebar-window-actions { width: 100%; justify-content: center; }
-.sidebar-collapsed .admin-card { display: grid; grid-template-columns: 1fr; padding: 7px; }
-.sidebar-collapsed .admin-avatar { margin: auto; }
+.sidebar-collapsed .admin-card { width: 100%; min-height: 34px; margin-inline: 0; padding: 0; display: grid; grid-template-columns: 34px; place-content: center; border-color: transparent; background: transparent; }
+.sidebar-collapsed .admin-avatar { margin: 0; }
 .sidebar-collapsed .new-session-button { grid-template-columns: 1fr; padding: 0; }
 .sidebar-collapsed .new-session-icon { margin: auto; }
 
@@ -392,7 +393,7 @@ h1 { margin: 0; font-size: 25px; line-height: 1.15; letter-spacing: -.035em; }
   .sidebar-collapsed .sidebar { padding: 16px 13px 14px; }
   .sidebar-collapsed .sidebar-brand-row { justify-content: space-between; }
   .sidebar-collapsed .sidebar-window-actions { width: auto; justify-content: flex-end; }
-  .sidebar-collapsed .admin-card { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; padding: 9px; }
+  .sidebar-collapsed .admin-card { width: auto; min-height: 54px; margin: 15px 1px 12px; padding: 9px; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; border-color: #252c39; background: rgba(255,255,255,.025); }
   .sidebar-collapsed .new-session-button { grid-template-columns: 24px minmax(0, 1fr) auto; padding: 0 10px; }
   .sidebar.open { transform: translateX(0); }
   .scrim { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.55); }

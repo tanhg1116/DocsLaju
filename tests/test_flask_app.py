@@ -136,11 +136,13 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
             b'id="icon-more-horizontal"',
             b'id="icon-scan-text"',
             b'id="icon-printer"',
+            b'id="icon-user-round"',
         ):
             assert icon_id in page.data
         assert b'data-tooltip="Run OCR on this page"' in page.data
         assert b'data-tooltip="Export document as PDF"' in page.data
         assert b'class="auto-ocr-track"' in page.data
+        assert b'id="adminAvatar" aria-hidden="true"' in page.data
         assert b'class="rendered-title-actions"' in page.data
         assert b"function iconMarkup" in script.data
         assert b"function setIconButton" in script.data
