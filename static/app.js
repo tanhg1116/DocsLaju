@@ -63,8 +63,20 @@ const ui = {
   batchProgressCount: document.querySelector("#batchProgressCount"),
   batchProgressBar: document.querySelector("#batchProgressBar"),
   exportButton: document.querySelector("#exportButton"),
+  exportDialog: document.querySelector("#exportDialog"),
+  exportForm: document.querySelector("#exportForm"),
+  exportDocumentLabel: document.querySelector("#exportDocumentLabel"),
+  exportStatus: document.querySelector("#exportStatus"),
+  exportCancel: document.querySelector("#exportCancel"),
   copyButton: document.querySelector("#copyButton"),
   saveState: document.querySelector("#saveState"),
+  importDialog: document.querySelector("#importDialog"),
+  importForm: document.querySelector("#importForm"),
+  importFilePicker: document.querySelector("#importFilePicker"),
+  importClipboardButton: document.querySelector("#importClipboardButton"),
+  importFileLabel: document.querySelector("#importFileLabel"),
+  importStatus: document.querySelector("#importStatus"),
+  importCancel: document.querySelector("#importCancel"),
   fileInput: document.querySelector("#fileInput"),
   toastRegion: document.querySelector("#toastRegion"),
   appShell: document.querySelector(".app-shell"),
@@ -92,6 +104,7 @@ let activeJobId = null;
 let jobPollTimer = null;
 let lastJobCompleted = 0;
 let manualOcrContext = null;
+let pendingUploadFiles = [];
 const expandedProjects = new Set();
 
 function iconMarkup(name, extraClass = "") {
@@ -912,20 +925,32 @@ async function createNewSession(projectId = null) {
   }
 }
 
-async function upload(file) {
-  if (!file) return;
+async function uploadFiles(files) {
+  const selectedFiles = [...(files || [])];
+  if (!selectedFiles.length) return false;
   const session = activeSession();
-  const form = new FormData();
-  form.append("file", file);
+  if (!session) return false;
+  let uploaded = 0;
   try {
     setBusy(true, "Uploading…");
     ui.fileStatus.textContent = "Uploading";
-    state = await api(`/api/sessions/${session.id}/files`, { method: "POST", body: form });
+    for (const file of selectedFiles) {
+      const form = new FormData();
+      form.append("file", file);
+      state = await api(`/api/sessions/${session.id}/files`, { method: "POST", body: form });
+      uploaded += 1;
+      ui.importStatus.textContent = `Uploaded ${uploaded} of ${selectedFiles.length}…`;
+    }
     renderState();
-    toast(`${file.name} uploaded`);
-    await runOcr();
+    toast(uploaded === 1 ? `${selectedFiles[0].name} uploaded` : `${uploaded} documents uploaded`);
+    setTimeout(() => runOcr(), 0);
+    return true;
   } catch (error) {
+    if (uploaded) renderState();
+    ui.importStatus.textContent = error.message;
+    ui.importStatus.classList.add("error");
     toast(error.message, "error");
+    return false;
   } finally {
     ui.fileInput.value = "";
     setBusy(false);
@@ -1179,42 +1204,155 @@ function saveMarkdown(value) {
   }, 450);
 }
 
-async function openPdfExport() {
+async function savePendingMarkdown() {
   const document = activeDocument();
-  if (!document) return;
-  const exportUrl = routeForDocument("/print");
-  const exportWindow = window.open("", "_blank");
-  if (!exportWindow) {
-    toast("Allow popups to open the PDF print view", "error");
+  if (!document || !markdownDirty) return;
+  clearTimeout(saveTimer);
+  const value = ui.markdownEditor.value;
+  setBusy(true, "Saving before export…");
+  await api(routeForDocument(`/markdown/${document.current_page}`), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ markdown: value }),
+  });
+  markdownDirty = false;
+  ui.saveState.textContent = "Saved";
+}
+
+function openImportDialog() {
+  ui.fileInput.value = "";
+  pendingUploadFiles = [];
+  ui.importFileLabel.textContent = "Choose PDF or image files";
+  ui.importStatus.textContent = "";
+  ui.importStatus.classList.remove("error");
+  ui.importDialog.classList.remove("is-busy");
+  if (typeof ui.importDialog.showModal === "function") ui.importDialog.showModal();
+  else ui.importDialog.setAttribute("open", "");
+}
+
+function setPendingUploadFiles(files, label = null) {
+  pendingUploadFiles = [...files];
+  ui.importFileLabel.textContent = label || (
+    pendingUploadFiles.length === 1
+      ? pendingUploadFiles[0].name
+      : pendingUploadFiles.length > 1
+        ? `${pendingUploadFiles.length} files selected`
+        : "Choose PDF or image files"
+  );
+  ui.importStatus.textContent = pendingUploadFiles.length
+    ? `${pendingUploadFiles.length} file${pendingUploadFiles.length === 1 ? "" : "s"} ready to upload`
+    : "";
+  ui.importStatus.classList.remove("error");
+}
+
+function clipboardImageFile(blob) {
+  const extension = {
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/png": "png",
+  }[blob.type] || "png";
+  const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "");
+  return new File([blob], `clipboard-${timestamp}.${extension}`, { type: blob.type || "image/png" });
+}
+
+async function readClipboardImage() {
+  if (!navigator.clipboard?.read) {
+    ui.importStatus.textContent = "Press Ctrl+V to paste an image in this window";
+    ui.importStatus.classList.add("error");
     return;
   }
-  exportWindow.opener = null;
-  exportWindow.document.title = "Preparing PDF export";
-  exportWindow.document.body.textContent = "Preparing the printable document...";
-
   try {
-    if (markdownDirty) {
-      clearTimeout(saveTimer);
-      const value = ui.markdownEditor.value;
-      const saveUrl = routeForDocument(`/markdown/${document.current_page}`);
-      setBusy(true, "Saving before export...");
-      await api(saveUrl, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ markdown: value }),
-      });
-      markdownDirty = false;
-      ui.saveState.textContent = "Saved";
+    const clipboardItems = await navigator.clipboard.read();
+    for (const item of clipboardItems) {
+      const imageType = item.types.find((type) => type.startsWith("image/"));
+      if (!imageType) continue;
+      const image = clipboardImageFile(await item.getType(imageType));
+      ui.fileInput.value = "";
+      setPendingUploadFiles([image], `${image.name} · pasted image`);
+      return;
     }
-    exportWindow.location.replace(exportUrl);
+    throw new Error("The clipboard does not contain an image");
   } catch (error) {
-    exportWindow.close();
-    ui.saveState.textContent = "Save failed";
-    toast(error.message, "error");
+    ui.importStatus.textContent = error.name === "NotAllowedError"
+      ? "Clipboard access was blocked. Press Ctrl+V in this window instead."
+      : error.message;
+    ui.importStatus.classList.add("error");
   }
 }
 
-function openFilePicker() { ui.fileInput.click(); }
+function closeImportDialog() {
+  if (ui.importDialog.open) ui.importDialog.close();
+  else ui.importDialog.removeAttribute("open");
+}
+
+function openExportDialog() {
+  const document = activeDocument();
+  if (!document) return;
+  ui.exportDocumentLabel.textContent = document.name;
+  ui.exportStatus.textContent = "";
+  ui.exportStatus.classList.remove("error");
+  ui.exportDialog.classList.remove("is-busy");
+  ui.exportForm.elements.exportFormat.value = "markdown";
+  if (typeof ui.exportDialog.showModal === "function") ui.exportDialog.showModal();
+  else ui.exportDialog.setAttribute("open", "");
+}
+
+function closeExportDialog() {
+  if (ui.exportDialog.open) ui.exportDialog.close();
+  else ui.exportDialog.removeAttribute("open");
+}
+
+function downloadResponseBlob(response, blob) {
+  const disposition = response.headers.get("content-disposition") || "";
+  const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  const filename = decodeURIComponent(utf8Name || plainName || "docslaju-export");
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+async function downloadExport(format) {
+  const document = activeDocument();
+  if (!document) return;
+  const suffix = {
+    markdown: "/export.zip",
+    pdf: "/export.pdf",
+    bundle: "/export-bundle.zip",
+  }[format];
+  if (!suffix) return;
+  ui.exportDialog.classList.add("is-busy");
+  ui.exportStatus.textContent = format === "markdown"
+    ? "Packaging Markdown and assets…"
+    : "Rendering the document PDF…";
+  ui.exportStatus.classList.remove("error");
+  try {
+    await savePendingMarkdown();
+    const response = await fetch(routeForDocument(suffix));
+    if (!response.ok) {
+      const payload = (response.headers.get("content-type") || "").includes("application/json")
+        ? await response.json()
+        : null;
+      throw new Error(payload?.error || `Export failed (${response.status})`);
+    }
+    downloadResponseBlob(response, await response.blob());
+    closeExportDialog();
+    toast(format === "pdf" ? "PDF exported" : "Export package ready");
+  } catch (error) {
+    ui.exportStatus.textContent = error.message;
+    ui.exportStatus.classList.add("error");
+    toast(error.message, "error");
+  } finally {
+    ui.exportDialog.classList.remove("is-busy");
+    setBusy(false);
+  }
+}
+
 function openSidebar() { ui.sidebar.classList.add("open"); ui.scrim.classList.add("open"); }
 function closeSidebar() { ui.sidebar.classList.remove("open"); ui.scrim.classList.remove("open"); }
 function setSidebarCollapsed(collapsed) {
@@ -1339,9 +1477,45 @@ document.addEventListener("keydown", (event) => {
 });
 
 for (const id of ["uploadButton", "emptyUploadButton"]) {
-  document.querySelector(`#${id}`).addEventListener("click", openFilePicker);
+  document.querySelector(`#${id}`).addEventListener("click", openImportDialog);
 }
-ui.fileInput.addEventListener("change", () => upload(ui.fileInput.files[0]));
+ui.importFilePicker.addEventListener("click", () => ui.fileInput.click());
+ui.fileInput.addEventListener("change", () => {
+  setPendingUploadFiles(ui.fileInput.files);
+});
+ui.importClipboardButton.addEventListener("click", readClipboardImage);
+ui.importDialog.addEventListener("paste", (event) => {
+  const pastedImages = [...(event.clipboardData?.files || [])]
+    .filter((file) => file.type.startsWith("image/"));
+  if (!pastedImages.length) {
+    ui.importStatus.textContent = "The clipboard does not contain an image";
+    ui.importStatus.classList.add("error");
+    return;
+  }
+  event.preventDefault();
+  const images = pastedImages.map((file) => clipboardImageFile(file));
+  ui.fileInput.value = "";
+  setPendingUploadFiles(images, images.length === 1 ? `${images[0].name} · pasted image` : `${images.length} pasted images`);
+});
+ui.importCancel.addEventListener("click", closeImportDialog);
+ui.importForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const files = [...pendingUploadFiles];
+  if (!files.length) {
+    ui.importStatus.textContent = "Choose one or more PDF or image files";
+    ui.importStatus.classList.add("error");
+    return;
+  }
+  ui.importDialog.classList.add("is-busy");
+  ui.importStatus.classList.remove("error");
+  ui.importStatus.textContent = "Uploading selected files…";
+  const succeeded = await uploadFiles(files);
+  ui.importDialog.classList.remove("is-busy");
+  if (succeeded) {
+    pendingUploadFiles = [];
+    closeImportDialog();
+  }
+});
 ui.documentPickerButton.addEventListener("click", (event) => {
   event.stopPropagation();
   if (ui.documentPickerButton.disabled) return;
@@ -1392,7 +1566,12 @@ ui.copyButton.addEventListener("click", async () => {
     toast("Markdown copied");
   }
 });
-ui.exportButton.addEventListener("click", openPdfExport);
+ui.exportButton.addEventListener("click", openExportDialog);
+ui.exportCancel.addEventListener("click", closeExportDialog);
+ui.exportForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  downloadExport(ui.exportForm.elements.exportFormat.value);
+});
 ui.fitPageButton.addEventListener("click", () => setPreviewView("fit-page"));
 ui.fitWidthButton.addEventListener("click", () => setPreviewView("fit-width"));
 ui.zoomOutButton.addEventListener("click", () => changeZoom(-10));
@@ -1455,8 +1634,7 @@ document.addEventListener("drop", (event) => {
   event.stopPropagation();
   const files = Array.from(event.dataTransfer.files || []);
   if (!files.length) return;
-  if (files.length > 1) toast("Only the first dropped file will be uploaded");
-  upload(files[0]);
+  uploadFiles(files);
 }, true);
 
 document.addEventListener("dragleave", (event) => {

@@ -119,9 +119,17 @@ def test_sidebar_exposes_projects_and_complete_session_menu():
             b'id="autoOcrDialog"',
             b'id="autoOcrRange"',
             b'id="dropOverlay"',
+            b'id="importDialog"',
+            b'id="importClipboardButton"',
+            b'id="exportDialog"',
+            b'value="markdown"',
+            b'value="pdf"',
+            b'value="bundle"',
         ):
             assert marker in page.data
         assert b'id="uploadButtonTop"' not in page.data
+        assert b'id="webpageUrl"' not in page.data
+        assert b'id="icon-clipboard"' in page.data
 
 
 def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
@@ -140,12 +148,14 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         ):
             assert icon_id in page.data
         assert b'data-tooltip="Run OCR on this page"' in page.data
-        assert b'data-tooltip="Export document as PDF"' in page.data
+        assert b'data-tooltip="Export document"' in page.data
         assert b'class="auto-ocr-track"' in page.data
         assert b'id="adminAvatar" aria-hidden="true"' in page.data
         assert b'class="rendered-title-actions"' in page.data
         assert b"function iconMarkup" in script.data
         assert b"function setIconButton" in script.data
+        assert b"navigator.clipboard.read" in script.data
+        assert b'ui.importDialog.addEventListener("paste"' in script.data
         assert b"function formatNumberedEquations" in script.data
         assert b"formatNumberedEquations(ui.renderedContent)" in script.data
         assert b"function normalizeRenderedLists" in script.data
@@ -213,6 +223,31 @@ def test_document_delete_removes_content_and_selects_a_replacement(isolated_data
         assert connection.execute("SELECT COUNT(*) FROM documents WHERE id = ?", (second["id"],)).fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM document_pages WHERE document_id = ?", (second["id"],)).fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM document_assets WHERE document_id = ?", (second["id"],)).fetchone()[0] == 0
+
+
+def test_pdf_and_combined_exports_return_rendered_pdf(monkeypatch):
+    rendered_pdf = b"%PDF-1.4\nrendered-output"
+    monkeypatch.setattr("app._render_document_pdf", lambda *_args: rendered_pdf)
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        document_id = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(b"source-image"), "report.png")},
+            content_type="multipart/form-data",
+        ).get_json()["active_document"]["id"]
+        app.extensions["database"].save_page_markdown(document_id, 1, "# Rendered report")
+
+        pdf = client.get(f"/api/sessions/{session_id}/files/{document_id}/export.pdf")
+        combined = client.get(
+            f"/api/sessions/{session_id}/files/{document_id}/export-bundle.zip"
+        )
+
+    assert pdf.status_code == 200
+    assert pdf.content_type == "application/pdf"
+    assert pdf.data == rendered_pdf
+    with zipfile.ZipFile(io.BytesIO(combined.data)) as bundle:
+        assert bundle.read("report.md").decode() == "# Rendered report"
+        assert bundle.read("report.pdf") == rendered_pdf
 
 
 def test_ocr_assets_use_short_links_render_live_export_and_cascade(isolated_database: Path):

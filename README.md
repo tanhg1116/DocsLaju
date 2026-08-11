@@ -16,12 +16,12 @@ This branch transitions the UI from Streamlit to a custom Flask frontend while p
 - Project folders with drag-and-drop organization
 - Rename, pin, archive, move, and delete session actions
 - Collapsible sidebar with the preference retained in the browser
-- Header document picker with per-document deletion and an adjacent upload button
+- Header document picker with per-document deletion and an adjacent multi-file upload dialog
 - Drag-and-drop PDF/image upload directly onto the preview pane
 - Non-blocking automatic OCR toggle with a configurable page range, progress, and immediate queue cancellation
 - SQLite persistence for sessions, uploads, and per-page OCR edits
 - Per-page OCR and editing with `mistral-ocr-latest`
-- Browser-native PDF export containing every rendered OCR page and extracted image
+- Markdown ZIP, rendered PDF, and combined Markdown + PDF ZIP exports
 - Responsive mobile/tablet layout
 
 The local draft runs as a seeded admin user without a login screen. Its sessions,
@@ -80,7 +80,9 @@ instance/
 └── docslaju.sqlite3           Runtime database (automatic; Git-ignored)
 src/
 ├── mistral_client.py          Mistral SDK integration
-└── services/database.py       SQLite repository
+└── services/
+    ├── browser_pdf.py         Installed-browser PDF rendering
+    └── database.py            SQLite repository
 templates/index.html           Three-pane application shell
 static/app.css                 Responsive visual design
 static/app.js                  Sidebar, upload, OCR, editor, and export behavior
@@ -102,11 +104,10 @@ The complete database repository tree and relationship diagram are in
 - OCR-extracted images are stored as document-owned SQLite BLOB assets. Editable
   Markdown uses short paths such as `assets/report-2-image-1.jpg`; the live
   preview resolves them through an ownership-checked Flask endpoint.
-- The header export button opens an A4 print view for every source page, renders
-  local KaTeX and stored image assets, and opens the browser print dialog. Choose
-  **Save as PDF** for a single document-wide PDF; no server browser runtime is required.
-- The existing `.md` and `.zip` export endpoints remain available for portable
-  Markdown workflows.
+- The header export dialog offers a Markdown-and-assets ZIP, a rendered A4 PDF,
+  or one ZIP containing Markdown, assets, and the rendered PDF. PDF generation
+  reuses Chrome or Edge already installed on the host; no additional browser
+  dependency is downloaded.
 - Deleting a project moves its sessions to **Unfiled**. Deleting a session also
   deletes its stored documents and OCR pages.
 - Switching on automatic OCR opens a page-range dialog. The full document is

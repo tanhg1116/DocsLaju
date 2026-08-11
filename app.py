@@ -28,12 +28,14 @@ from src.mistral_client import (
     ocr_pdf_pages_with_assets,
 )
 from src.services.database import ADMIN_USER_ID, Database
+from src.services.browser_pdf import BrowserPdfError, render_url_to_pdf
 from src.services.ocr_jobs import OcrJobManager
 
 
 BASE_DIR = Path(__file__).resolve().parent
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+APP_PORT = int(os.getenv("PORT", "5000"))
 MATH_EXPRESSION_RE = re.compile(
     r"\$\$.*?\$\$|\\\[.*?\\\]|\\\(.*?\\\)|"
     r"(?<!\$)\$(?![\s$])[^\n$]*?(?<!\s)\$(?![\d$])",
@@ -48,6 +50,9 @@ app.config.update(
     MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
     SECRET_KEY=os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32),
     DATABASE=os.getenv("DOCSLAJU_DB_PATH") or str(BASE_DIR / "instance" / "docslaju.sqlite3"),
+    INTERNAL_BASE_URL=(
+        os.getenv("DOCSLAJU_INTERNAL_BASE_URL") or f"http://127.0.0.1:{APP_PORT}"
+    ).rstrip("/"),
 )
 app.extensions["database"] = Database(app.config["DATABASE"], BASE_DIR / "db" / "schema.sql")
 app.extensions["database"].recover_interrupted_ocr_jobs()
@@ -600,6 +605,29 @@ def _export_document_markdown(document: dict) -> str:
     return "\n\n---\n\n".join(sections)
 
 
+def _render_document_pdf(session_id: str, file_id: str) -> bytes:
+    print_url = (
+        f"{app.config['INTERNAL_BASE_URL']}/api/sessions/"
+        f"{quote(session_id, safe='')}/files/{quote(file_id, safe='')}/print?autoprint=0"
+    )
+    try:
+        return render_url_to_pdf(print_url)
+    except BrowserPdfError as exc:
+        raise BadRequest(f"Could not create the rendered PDF: {exc}") from exc
+
+
+def _write_markdown_package(
+    bundle: zipfile.ZipFile,
+    document: dict,
+    markdown_payload: str,
+    assets: list[dict],
+) -> None:
+    stem = secure_filename(Path(document["name"]).stem) or "document"
+    bundle.writestr(f"{stem}.md", markdown_payload.encode("utf-8"))
+    for asset in assets:
+        bundle.writestr(f"assets/{asset['filename']}", asset["content"])
+
+
 @app.get("/api/sessions/<session_id>/files/<file_id>/export.md")
 def export_markdown(session_id: str, file_id: str) -> Response:
     document = _document(session_id, file_id)
@@ -620,15 +648,46 @@ def export_document_package(session_id: str, file_id: str) -> Response:
     stem = secure_filename(Path(document["name"]).stem) or "document"
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-        bundle.writestr(f"{stem}.md", markdown_payload.encode("utf-8"))
-        for asset in assets:
-            bundle.writestr(f"assets/{asset['filename']}", asset["content"])
+        _write_markdown_package(bundle, document, markdown_payload, assets)
     archive.seek(0)
     return send_file(
         archive,
         mimetype="application/zip",
         as_attachment=True,
         download_name=f"{stem}.zip",
+    )
+
+
+@app.get("/api/sessions/<session_id>/files/<file_id>/export.pdf")
+def export_document_pdf(session_id: str, file_id: str) -> Response:
+    document = _document(session_id, file_id)
+    stem = secure_filename(Path(document["name"]).stem) or "document"
+    payload = _render_document_pdf(session_id, file_id)
+    return send_file(
+        io.BytesIO(payload),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"{stem}.pdf",
+    )
+
+
+@app.get("/api/sessions/<session_id>/files/<file_id>/export-bundle.zip")
+def export_document_bundle(session_id: str, file_id: str) -> Response:
+    document = _document(session_id, file_id)
+    markdown_payload = _export_document_markdown(document)
+    assets = _db().list_document_assets(ADMIN_USER_ID, session_id, file_id)
+    pdf_payload = _render_document_pdf(session_id, file_id)
+    stem = secure_filename(Path(document["name"]).stem) or "document"
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        _write_markdown_package(bundle, document, markdown_payload, assets)
+        bundle.writestr(f"{stem}.pdf", pdf_payload)
+    archive.seek(0)
+    return send_file(
+        archive,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{stem}-markdown-and-pdf.zip",
     )
 
 
@@ -651,4 +710,4 @@ def handle_unexpected_error(error: Exception) -> tuple[Response, int]:
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=int(os.getenv("PORT", "5000")), debug=True)
+    app.run(host="127.0.0.1", port=APP_PORT, debug=True)
