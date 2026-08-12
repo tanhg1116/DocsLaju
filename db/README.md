@@ -38,6 +38,8 @@ users
 - A session is owned by one user and may belong to one project. Pin and archive
   state are stored on the session.
 - Uploaded file bytes are stored in `documents` for this local testing phase.
+- `documents.document_type` stores the user's optional structured template choice;
+  a null value means the user was unsure and standard Markdown OCR is used.
 - OCR Markdown is stored per document page, so edits survive a Flask restart.
 - Page rows also store OCR confidence and a review state: `unreviewed`,
   `needs_review`, or `approved`. Editing an approved page returns it to review.
@@ -53,6 +55,8 @@ users
   requests for the same document and profile.
 - `document_pages.source_markdown` preserves the OCR response while `markdown`
   holds the editable version with short asset references.
+- `document_pages.preprocessing_json` records the conditional local image
+  enhancements used for OCR. The original document bytes remain in `documents`.
 - Batch progress is stored in `ocr_jobs` and `ocr_job_pages`. A page whose HTTP
   request was interrupted is returned to the queue when Flask restarts; completed
   pages remain completed, and cancelled jobs remain cancelled.

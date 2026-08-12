@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 import PyPDF2
+from PIL import Image
 
 from app import _normalize_template_data, _prepare_ocr_markdown, app
 from src.extraction_templates import get_template
@@ -17,6 +18,12 @@ from src.mistral_client import (
     OcrPageResult,
 )
 from src.services.database import ADMIN_USER_ID, Database
+
+
+def _test_png_bytes() -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (80, 120), "white").save(output, format="PNG")
+    return output.getvalue()
 
 
 def test_schema_contains_the_persistent_repository(isolated_database: Path):
@@ -41,15 +48,48 @@ def test_schema_contains_the_persistent_repository(isolated_database: Path):
             row[1] for row in connection.execute("PRAGMA table_info(document_pages)")
         }
         assert "source_markdown" in page_columns
-        assert {"confidence_score", "review_status", "reviewed_at"} <= page_columns
+        assert {"preprocessing_json", "confidence_score", "review_status", "reviewed_at"} <= page_columns
         document_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(documents)")
         }
-        assert "checksum" in document_columns
+        assert {"checksum", "document_type"} <= document_columns
         extraction_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(document_extractions)")
         }
         assert "schema_version" in extraction_columns
+
+
+def test_upload_persists_optional_document_type(isolated_database: Path):
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        response = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={
+                "file": (io.BytesIO(_test_png_bytes()), "quotation.png"),
+                "document_type": "quotation",
+            },
+            content_type="multipart/form-data",
+        )
+
+        assert response.status_code == 201
+        payload = response.get_json()
+        assert payload["active_document"]["document_type"] == "quotation"
+        assert payload["sessions"][0]["files"][0]["document_type"] == "quotation"
+
+
+def test_invalid_upload_document_type_is_rejected(isolated_database: Path):
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        response = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={
+                "file": (io.BytesIO(_test_png_bytes()), "unknown.png"),
+                "document_type": "not-a-template",
+            },
+            content_type="multipart/form-data",
+        )
+
+    assert response.status_code == 400
 
 
 def test_extraction_template_catalog_is_versioned_and_layout_driven():
@@ -58,12 +98,14 @@ def test_extraction_template_catalog_is_versioned_and_layout_driven():
 
     assert response.status_code == 200
     templates = {item["id"]: item for item in response.get_json()["templates"]}
-    assert set(templates) == {"invoice", "receipt", "resume"}
+    assert set(templates) == {"invoice", "receipt", "quotation", "resume"}
     assert templates["invoice"]["schema_version"] == 1
     assert templates["receipt"]["schema_version"] == 1
+    assert templates["quotation"]["schema_version"] == 1
     assert templates["resume"]["schema_version"] == 2
     assert templates["invoice"]["layout"]["tables"][0]["key"] == "line_items"
     assert templates["receipt"]["layout"]["tables"][0]["key"] == "purchased_items"
+    assert templates["quotation"]["layout"]["tables"][0]["key"] == "quoted_items"
     assert {table["key"] for table in templates["resume"]["layout"]["tables"]} >= {
         "experience", "education", "projects", "certifications", "achievements"
     }
@@ -90,6 +132,36 @@ def test_resume_v2_has_contact_achievements_and_deduplicates_string_lists():
     assert normalized["skills"] == ["Python", "SQL"]
     assert normalized["achievements"][0]["title"] == "Competition winner"
     assert normalized["review_notes"] == ["Unreadable date"]
+
+
+def test_quotation_template_normalizes_commercial_terms_and_items():
+    template = get_template("quotation")
+    normalized = _normalize_template_data(
+        {
+            "document_type": "quotation",
+            "quotation_number": "Q-1042",
+            "valid_until": "2026-09-30",
+            "payment_terms": "50% deposit",
+            "quoted_items": [{
+                "item_code": "SKU-1",
+                "description": "Installation service",
+                "quantity": 2,
+                "unit": "job",
+                "unit_price": 100,
+                "discount_amount": None,
+                "tax_amount": 16,
+                "amount": 216,
+            }],
+            "review_notes": [],
+        },
+        template,
+    )
+
+    assert normalized["document_type"] == "quotation"
+    assert normalized["quotation_number"] == "Q-1042"
+    assert normalized["payment_terms"] == "50% deposit"
+    assert normalized["quoted_items"][0]["item_code"] == "SKU-1"
+    assert normalized["quoted_items"][0]["amount"] == 216.0
 
 
 def test_search_opens_the_matching_page_and_review_status_resets_after_edit(isolated_database: Path):
@@ -179,7 +251,7 @@ def test_receipt_extraction_is_separate_reviewable_and_exportable(monkeypatch, i
         session_id = client.get("/api/state").get_json()["active_session_id"]
         document_id = client.post(
             f"/api/sessions/{session_id}/files",
-            data={"file": (io.BytesIO(b"receipt-image"), "receipt.png")},
+            data={"file": (io.BytesIO(_test_png_bytes()), "receipt.png")},
             content_type="multipart/form-data",
         ).get_json()["active_document"]["id"]
         client.patch(
@@ -257,7 +329,7 @@ def test_receipt_template_combines_initial_ocr_and_extraction_in_one_request(
         session_id = client.get("/api/state").get_json()["active_session_id"]
         document_id = client.post(
             f"/api/sessions/{session_id}/files",
-            data={"file": (io.BytesIO(b"receipt-image"), "receipt.png")},
+            data={"file": (io.BytesIO(_test_png_bytes()), "receipt.png")},
             content_type="multipart/form-data",
         ).get_json()["active_document"]["id"]
         endpoint = (
@@ -273,6 +345,61 @@ def test_receipt_template_combines_initial_ocr_and_extraction_in_one_request(
         assert app.extensions["database"].get_page_markdown(document_id, 1) == (
             "# OCR and extraction from one response"
         )
+
+
+def test_typed_image_ocr_saves_markdown_and_structured_data_in_one_request(
+    monkeypatch,
+    isolated_database: Path,
+):
+    extracted = {
+        "document_type": "quotation",
+        "quotation_number": "Q-77",
+        "supplier_name": "Example Supplier",
+        "quoted_items": [],
+        "review_notes": [],
+    }
+    calls = []
+
+    def combined(*_args, **kwargs):
+        calls.append(kwargs)
+        return OcrDocumentResult(
+            pages=(OcrPageResult("# Quotation Q-77"),),
+            document_annotation=extracted,
+        )
+
+    monkeypatch.setattr("app.ocr_document_with_annotation", combined)
+    monkeypatch.setattr(
+        "app.ocr_image_with_assets",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("plain OCR must not run for a typed first OCR")
+        ),
+    )
+
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        uploaded = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={
+                "file": (io.BytesIO(_test_png_bytes()), "quotation.png"),
+                "document_type": "quotation",
+            },
+            content_type="multipart/form-data",
+        ).get_json()
+        document_id = uploaded["active_document"]["id"]
+
+        response = client.post(
+            f"/api/sessions/{session_id}/files/{document_id}/ocr/1",
+            json={"force": False},
+        )
+
+        assert response.status_code == 200
+        assert len(calls) == 1
+        assert response.get_json()["markdown"] == "# Quotation Q-77"
+        extraction = client.get(
+            f"/api/sessions/{session_id}/files/{document_id}/extractions/quotation"
+        ).get_json()["extraction"]
+        assert extraction["data"]["quotation_number"] == "Q-77"
+        assert client.get("/api/state").get_json()["active_document"]["has_ocr"] is True
 
 
 def test_initial_state_has_one_session():
@@ -368,7 +495,11 @@ def test_sidebar_exposes_projects_and_complete_session_menu():
             b'id="approvePageButton"',
             b'id="retryBatchButton"',
             b'id="extractButton"',
-            b'id="extractionDialog"',
+            b'id="markdownViewButton"',
+            b'id="structuredPane"',
+            b'id="importDocumentType"',
+            b'id="extractionProfile" type="search" role="combobox"',
+            b'id="extractionProfileMenu" role="listbox"',
             b'id="extractionDynamicFields"',
             b'id="editExtractionButton"',
             b'value="markdown"',
@@ -408,9 +539,14 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         assert b'document.addEventListener("paste"' in script.data
         assert b"function pastedImageFiles" in script.data
         assert b"function setExtractionEditMode" in script.data
+        assert b'function setWorkspaceView' in script.data
+        assert b"function renderExtractionTemplateOptions" in script.data
+        assert b"function normalizedTemplateSearch" in script.data
+        assert b'ui.extractionProfile.addEventListener("input"' in script.data
         assert b"control.readOnly = !extractionEditMode" in script.data
         assert b'editExtractionButton.addEventListener("click"' in script.data
         assert b".extraction-edit-only" in css.data
+        assert b".extraction-template-menu" in css.data
         assert b"Ctrl+V" in page.data
         assert b"function formatNumberedEquations" in script.data
         assert b"formatNumberedEquations(ui.renderedContent)" in script.data
@@ -526,8 +662,15 @@ def test_ocr_assets_use_short_links_render_live_export_and_cascade(isolated_data
                 "mime_type": "image/png",
                 "content": image_bytes,
             }],
+            preprocessing_report={
+                "version": 1,
+                "used_original": False,
+                "actions": ["upscaled_2.0x"],
+            },
         )
         app.extensions["database"].save_page_markdown(document_id, 1, markdown)
+        state = client.get("/api/state").get_json()
+        assert state["active_document"]["ocr_preprocessing"]["actions"] == ["upscaled_2.0x"]
 
         rendered = client.post(
             "/api/render",

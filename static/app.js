@@ -1,4 +1,5 @@
 const ui = {
+  workspaceGrid: document.querySelector("#workspaceGrid"),
   sessionList: document.querySelector("#sessionList"),
   projectList: document.querySelector("#projectList"),
   archivedSessionList: document.querySelector("#archivedSessionList"),
@@ -71,9 +72,12 @@ const ui = {
   retryBatchButton: document.querySelector("#retryBatchButton"),
   exportButton: document.querySelector("#exportButton"),
   extractButton: document.querySelector("#extractButton"),
-  extractionDialog: document.querySelector("#extractionDialog"),
+  markdownViewButton: document.querySelector("#markdownViewButton"),
+  structuredPane: document.querySelector("#structuredPane"),
   extractionForm: document.querySelector("#extractionForm"),
   extractionProfile: document.querySelector("#extractionProfile"),
+  extractionTemplateCombobox: document.querySelector("#extractionTemplateCombobox"),
+  extractionProfileMenu: document.querySelector("#extractionProfileMenu"),
   extractionDocumentLabel: document.querySelector("#extractionDocumentLabel"),
   extractionEmpty: document.querySelector("#extractionEmpty"),
   extractionEmptyMessage: document.querySelector("#extractionEmptyMessage"),
@@ -87,7 +91,7 @@ const ui = {
   saveExtractionButton: document.querySelector("#saveExtractionButton"),
   approveExtractionButton: document.querySelector("#approveExtractionButton"),
   extractionCsv: document.querySelector("#extractionCsv"),
-  extractionClose: document.querySelector("#extractionClose"),
+  importDocumentType: document.querySelector("#importDocumentType"),
   extractionDynamicFields: document.querySelector("#extractionDynamicFields"),
   exportDialog: document.querySelector("#exportDialog"),
   exportForm: document.querySelector("#exportForm"),
@@ -138,6 +142,7 @@ let currentExtraction = null;
 let extractionTemplates = [];
 let currentExtractionLayout = null;
 let extractionEditMode = false;
+let workspaceView = "markdown";
 const expandedProjects = new Set();
 
 function iconMarkup(name, extraClass = "") {
@@ -317,6 +322,7 @@ async function loadPreview() {
   const session = activeSession();
   const document = activeDocument();
   if (!document || !session) {
+    setWorkspaceView("markdown");
     previewContext = null;
     if (generation !== previewGeneration) return;
     return emptyPreview();
@@ -1034,6 +1040,24 @@ function renderMarkdown(value) {
   }, 120);
 }
 
+function preprocessingSummary(report) {
+  if (!report) return "";
+  if (report.used_original || !report.actions?.length) return "Original image used";
+  const labels = {
+    corrected_orientation: "rotated",
+    flattened_transparency: "flattened",
+    cropped_page_or_webpage_border: "cropped",
+    denoised: "denoised",
+    enhanced_contrast: "contrast enhanced",
+    lightly_sharpened: "sharpened",
+  };
+  return report.actions.map((action) => {
+    if (action.startsWith("upscaled_")) return action.replace("upscaled_", "upscaled ");
+    if (action.startsWith("deskewed_")) return "deskewed";
+    return labels[action] || action.replaceAll("_", " ");
+  }).join(" · ");
+}
+
 function renderState({ refreshPreview = true } = {}) {
   const session = activeSession();
   const document = activeDocument();
@@ -1047,6 +1071,7 @@ function renderState({ refreshPreview = true } = {}) {
     ui.documentMeta.textContent = "Original page";
     ui.pageControls.hidden = true;
     ui.fileStatus.textContent = "No document selected";
+    ui.fileStatus.removeAttribute("title");
     ui.markdownEditor.value = "";
     markdownDirty = false;
     ui.markdownEditor.disabled = true;
@@ -1055,6 +1080,7 @@ function renderState({ refreshPreview = true } = {}) {
     ui.autoOcrToggle.disabled = true;
     ui.autoOcrControl.classList.add("disabled");
     ui.extractButton.disabled = true;
+    ui.markdownViewButton.disabled = true;
     ui.exportButton.disabled = true;
     ui.copyButton.disabled = true;
     ui.ocrBadge.textContent = "Waiting";
@@ -1076,13 +1102,22 @@ function renderState({ refreshPreview = true } = {}) {
   ui.pageCount.textContent = `of ${document.num_pages}`;
   ui.previousPage.disabled = document.current_page <= 1;
   ui.nextPage.disabled = document.current_page >= document.num_pages;
-  ui.fileStatus.textContent = document.has_ocr ? "OCR complete" : "Not scanned";
+  const optimization = preprocessingSummary(document.ocr_preprocessing);
+  ui.fileStatus.textContent = document.has_ocr
+    ? `OCR complete${optimization ? ` · ${optimization}` : ""}`
+    : "Not scanned";
+  if (document.ocr_preprocessing) {
+    ui.fileStatus.title = `OCR input: ${optimization}. Original upload was preserved.`;
+  } else {
+    ui.fileStatus.removeAttribute("title");
+  }
 
   ui.markdownEditor.disabled = false;
   ui.markdownEditor.value = document.markdown;
   markdownDirty = false;
   ui.ocrButton.disabled = false;
   ui.extractButton.disabled = false;
+  ui.markdownViewButton.disabled = false;
   setIconButton(ui.ocrButton, document.has_ocr ? "Re-OCR this page" : "Run OCR on this page", "scan-text");
   ui.exportButton.disabled = !document.has_ocr;
   ui.copyButton.disabled = !document.markdown;
@@ -1099,6 +1134,7 @@ function renderState({ refreshPreview = true } = {}) {
   setOcrLoading(Boolean(manualIsCurrent), document.current_page);
   updateBatchControls(state.active_ocr_job || state.recent_ocr_job);
   if (refreshPreview) loadPreview();
+  if (workspaceView === "structured") setTimeout(openStructuredView, 0);
 }
 
 async function refresh(options) {
@@ -1133,7 +1169,7 @@ async function createNewSession(projectId = null) {
   }
 }
 
-async function uploadFiles(files) {
+async function uploadFiles(files, documentType = "") {
   const selectedFiles = [...(files || [])];
   if (!selectedFiles.length) return false;
   const session = activeSession();
@@ -1147,6 +1183,7 @@ async function uploadFiles(files) {
     for (const file of selectedFiles) {
       const form = new FormData();
       form.append("file", file);
+      if (documentType) form.append("document_type", documentType);
       state = await api(`/api/sessions/${session.id}/files`, { method: "POST", body: form });
       lastWasNew = !state.upload?.duplicate;
       if (lastWasNew) uploaded += 1;
@@ -1481,6 +1518,7 @@ function openImportDialog() {
   ui.importFileLabel.textContent = "Choose PDF or image files";
   ui.importStatus.textContent = "";
   ui.importStatus.classList.remove("error");
+  ui.importDocumentType.value = "";
   ui.importDialog.classList.remove("is-busy");
   if (typeof ui.importDialog.showModal === "function") ui.importDialog.showModal();
   else ui.importDialog.setAttribute("open", "");
@@ -1514,14 +1552,14 @@ function clipboardImageFile(blob) {
 function pastedImageFiles(event) {
   const clipboard = event.clipboardData;
   if (!clipboard) return [];
-  const candidates = [...(clipboard.files || [])];
-  for (const item of [...(clipboard.items || [])]) {
-    if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
-    const file = item.getAsFile();
-    if (file && !candidates.includes(file)) candidates.push(file);
-  }
+  const clipboardFiles = [...(clipboard.files || [])].filter((file) => file.type.startsWith("image/"));
+  const candidates = clipboardFiles.length
+    ? clipboardFiles
+    : [...(clipboard.items || [])]
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter(Boolean);
   return candidates
-    .filter((file) => file.type.startsWith("image/"))
     .map(clipboardImageFile);
 }
 
@@ -1628,11 +1666,70 @@ async function downloadExport(format) {
 }
 
 function selectedExtractionTemplate() {
-  return extractionTemplates.find((template) => template.id === ui.extractionProfile.value) || null;
+  return extractionTemplates.find((template) => template.id === ui.extractionProfile.dataset.templateId) || null;
 }
 
 function extractionEndpoint(suffix = "") {
-  return routeForDocument(`/extractions/${encodeURIComponent(ui.extractionProfile.value)}${suffix}`);
+  const template = selectedExtractionTemplate();
+  return routeForDocument(`/extractions/${encodeURIComponent(template?.id || "")}${suffix}`);
+}
+
+function normalizedTemplateSearch(value) {
+  return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+
+function templateSearchText(template) {
+  const aliases = template.id === "resume" ? "cv resume curriculum vitae" : "";
+  return normalizedTemplateSearch(`${template.id} ${template.label} ${template.description} ${aliases}`);
+}
+
+function closeExtractionTemplateMenu() {
+  ui.extractionProfileMenu.hidden = true;
+  ui.extractionProfile.setAttribute("aria-expanded", "false");
+}
+
+function renderExtractionTemplateOptions(query = "") {
+  const search = normalizedTemplateSearch(query);
+  const matches = extractionTemplates.filter((template) => templateSearchText(template).includes(search));
+  ui.extractionProfileMenu.replaceChildren();
+  if (!matches.length) {
+    const empty = document.createElement("p");
+    empty.className = "extraction-template-empty";
+    empty.textContent = "No matching document type";
+    ui.extractionProfileMenu.append(empty);
+  } else {
+    for (const template of matches) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.setAttribute("role", "option");
+      option.dataset.templateId = template.id;
+      const label = document.createElement("strong");
+      label.textContent = template.label;
+      const description = document.createElement("small");
+      description.textContent = template.description;
+      option.append(label, description);
+      option.addEventListener("mousedown", (event) => event.preventDefault());
+      option.addEventListener("click", () => selectExtractionTemplate(template));
+      ui.extractionProfileMenu.append(option);
+    }
+  }
+  ui.extractionProfileMenu.hidden = false;
+  ui.extractionProfile.setAttribute("aria-expanded", "true");
+}
+
+async function selectExtractionTemplate(template) {
+  const active = activeDocument();
+  if (active && active.document_type !== template.id) {
+    state = await api(routeForDocument("/document-type"), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_type: template.id }),
+    });
+  }
+  ui.extractionProfile.dataset.templateId = template.id;
+  ui.extractionProfile.value = template.label;
+  closeExtractionTemplateMenu();
+  await loadExtractionForTemplate();
 }
 
 function extractionInput(definition, value, dataAttribute, dataValue) {
@@ -1713,6 +1810,7 @@ function renderExtractionLayout(data) {
     for (const column of table.columns) {
       const th = document.createElement("th");
       th.textContent = column.label;
+      th.dataset.columnKey = column.key;
       headRow.append(th);
     }
     headRow.append(document.createElement("th"));
@@ -1741,14 +1839,14 @@ function renderExtractionLayout(data) {
 }
 
 function setExtractionBusy(isBusy, message = "") {
-  ui.extractionDialog.classList.toggle("is-busy", isBusy);
+  ui.structuredPane.classList.toggle("is-busy", isBusy);
   ui.extractionMessage.textContent = message;
   ui.extractionMessage.classList.remove("error", "warning");
 }
 
 function setExtractionEditMode(isEditing) {
   extractionEditMode = Boolean(isEditing && currentExtraction);
-  ui.extractionDialog.classList.toggle("is-editing", extractionEditMode);
+  ui.structuredPane.classList.toggle("is-editing", extractionEditMode);
   for (const control of ui.extractionDynamicFields.querySelectorAll("input, textarea")) {
     control.readOnly = !extractionEditMode;
   }
@@ -1760,6 +1858,7 @@ function setExtractionEditMode(isEditing) {
   ui.approveExtractionButton.disabled = extractionEditMode;
   ui.rerunExtractionButton.disabled = extractionEditMode;
   ui.extractionProfile.disabled = extractionEditMode;
+  if (extractionEditMode) closeExtractionTemplateMenu();
 }
 
 function renderExtraction(extraction) {
@@ -1771,6 +1870,8 @@ function renderExtraction(extraction) {
   ui.approveExtractionButton.hidden = !hasResult;
   ui.extractionCsv.hidden = !hasResult;
   if (!hasResult) {
+    ui.extractionStatus.hidden = true;
+    ui.extractionModel.textContent = "";
     ui.extractionDynamicFields.replaceChildren();
     setExtractionEditMode(false);
     return;
@@ -1781,6 +1882,7 @@ function renderExtraction(extraction) {
   const approved = extraction.status === "approved";
   ui.extractionStatus.textContent = approved ? "Approved" : "Needs review";
   ui.extractionStatus.className = `badge ${approved ? "complete" : "needs-review"}`;
+  ui.extractionStatus.hidden = false;
   ui.extractionModel.textContent = extraction.model || "mistral-ocr-latest";
   ui.approveExtractionButton.textContent = approved ? "Return to review" : "Approve";
   setExtractionEditMode(false);
@@ -1791,7 +1893,7 @@ function numberOrNull(value) {
 }
 
 function readExtractionForm() {
-  const data = { document_type: ui.extractionProfile.value };
+  const data = { document_type: selectedExtractionTemplate()?.id || null };
   for (const input of ui.extractionForm.querySelectorAll("[data-extraction-field]")) {
     data[input.dataset.extractionField] = input.type === "number"
       ? numberOrNull(input.value)
@@ -1822,9 +1924,11 @@ async function loadExtractionForTemplate() {
     renderExtraction(null);
     ui.runExtractionButton.disabled = true;
     ui.runExtractionButton.textContent = "Choose a document type";
-    ui.extractionEmptyMessage.textContent = "Choose Invoice, Receipt, or CV / Résumé to load its fields and tables.";
+    ui.extractionEmptyMessage.textContent = "Choose Invoice, Receipt, Quotation, or CV / Résumé to load its fields and tables.";
     ui.extractionMessage.textContent = "";
     ui.extractionMessage.classList.remove("error", "warning");
+    ui.extractionStatus.hidden = true;
+    ui.extractionModel.textContent = "";
     return;
   }
   currentExtractionLayout = template.layout;
@@ -1858,26 +1962,31 @@ async function loadExtractionForTemplate() {
   }
 }
 
-async function openExtractionDialog() {
+function setWorkspaceView(view) {
+  workspaceView = view === "structured" ? "structured" : "markdown";
+  const structured = workspaceView === "structured";
+  document.querySelector(".pane-rendered").hidden = structured;
+  document.querySelector(".pane-editor").hidden = structured;
+  ui.structuredPane.hidden = !structured;
+  ui.workspaceGrid.classList.toggle("structured-view", structured);
+  ui.markdownViewButton.classList.toggle("active", !structured);
+  ui.extractButton.classList.toggle("active", structured);
+  ui.markdownViewButton.setAttribute("aria-pressed", String(!structured));
+  ui.extractButton.setAttribute("aria-pressed", String(structured));
+}
+
+async function openStructuredView() {
   const document = activeDocument();
   if (!document) return;
+  setWorkspaceView("structured");
   ui.extractionDocumentLabel.textContent = `${document.name} · extracted data is stored separately from OCR Markdown`;
-  if (typeof ui.extractionDialog.showModal === "function") ui.extractionDialog.showModal();
-  else ui.extractionDialog.setAttribute("open", "");
   try {
     if (!extractionTemplates.length) {
       extractionTemplates = (await api("/api/extraction-templates")).templates;
-      const placeholder = window.document.createElement("option");
-      placeholder.value = "";
-      placeholder.textContent = "Choose a document type…";
-      ui.extractionProfile.replaceChildren(placeholder, ...extractionTemplates.map((template) => {
-        const option = window.document.createElement("option");
-        option.value = template.id;
-        option.textContent = template.label;
-        return option;
-      }));
     }
-    ui.extractionProfile.value = "";
+    const template = extractionTemplates.find((item) => item.id === document.document_type) || null;
+    ui.extractionProfile.dataset.templateId = template?.id || "";
+    ui.extractionProfile.value = template?.label || "";
     await loadExtractionForTemplate();
   } catch (error) {
     ui.extractionMessage.textContent = error.message;
@@ -1885,10 +1994,10 @@ async function openExtractionDialog() {
   }
 }
 
-function closeExtractionDialog() {
+function closeStructuredView() {
   setExtractionEditMode(false);
-  if (ui.extractionDialog.open) ui.extractionDialog.close();
-  else ui.extractionDialog.removeAttribute("open");
+  closeExtractionTemplateMenu();
+  setWorkspaceView("markdown");
 }
 
 async function runStructuredExtraction(confirmRerun = false) {
@@ -1916,7 +2025,7 @@ async function runStructuredExtraction(confirmRerun = false) {
     ui.extractionMessage.textContent = error.message;
     ui.extractionMessage.classList.add("error");
   } finally {
-    ui.extractionDialog.classList.remove("is-busy");
+    ui.structuredPane.classList.remove("is-busy");
   }
 }
 
@@ -1937,7 +2046,7 @@ async function saveStructuredExtraction(status = "needs_review") {
     ui.extractionMessage.textContent = error.message;
     ui.extractionMessage.classList.add("error");
   } finally {
-    ui.extractionDialog.classList.remove("is-busy");
+    ui.structuredPane.classList.remove("is-busy");
   }
 }
 
@@ -2115,8 +2224,8 @@ document.addEventListener("paste", (event) => {
   const images = pastedImageFiles(event);
   if (!images.length) return;
   event.preventDefault();
-  toast(images.length === 1 ? "Pasting clipboard image…" : `Pasting ${images.length} clipboard images…`);
-  uploadFiles(images);
+  openImportDialog();
+  setPendingUploadFiles(images, images.length === 1 ? `${images[0].name} · pasted image` : `${images.length} pasted images`);
 });
 ui.importCancel.addEventListener("click", closeImportDialog);
 ui.importForm.addEventListener("submit", async (event) => {
@@ -2130,7 +2239,7 @@ ui.importForm.addEventListener("submit", async (event) => {
   ui.importDialog.classList.add("is-busy");
   ui.importStatus.classList.remove("error");
   ui.importStatus.textContent = "Uploading selected files…";
-  const succeeded = await uploadFiles(files);
+  const succeeded = await uploadFiles(files, ui.importDocumentType.value);
   ui.importDialog.classList.remove("is-busy");
   if (succeeded) {
     pendingUploadFiles = [];
@@ -2202,9 +2311,45 @@ ui.exportForm.addEventListener("submit", (event) => {
   event.preventDefault();
   downloadExport(ui.exportForm.elements.exportFormat.value);
 });
-ui.extractButton.addEventListener("click", openExtractionDialog);
-ui.extractionProfile.addEventListener("change", loadExtractionForTemplate);
-ui.extractionClose.addEventListener("click", closeExtractionDialog);
+ui.extractButton.addEventListener("click", openStructuredView);
+ui.markdownViewButton.addEventListener("click", closeStructuredView);
+ui.extractionProfile.addEventListener("focus", () => renderExtractionTemplateOptions(ui.extractionProfile.value));
+ui.extractionProfile.addEventListener("input", () => {
+  const selected = selectedExtractionTemplate();
+  if (!selected || normalizedTemplateSearch(ui.extractionProfile.value) !== normalizedTemplateSearch(selected.label)) {
+    ui.extractionProfile.dataset.templateId = "";
+    loadExtractionForTemplate();
+  }
+  renderExtractionTemplateOptions(ui.extractionProfile.value);
+});
+ui.extractionProfile.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeExtractionTemplateMenu();
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (ui.extractionProfileMenu.hidden) renderExtractionTemplateOptions(ui.extractionProfile.value);
+    ui.extractionProfileMenu.querySelector("button")?.focus();
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const firstMatch = ui.extractionProfileMenu.querySelector("button[data-template-id]");
+    const template = extractionTemplates.find((item) => item.id === firstMatch?.dataset.templateId);
+    if (template) selectExtractionTemplate(template);
+  }
+});
+ui.extractionForm.addEventListener("submit", (event) => event.preventDefault());
+ui.extractionProfile.addEventListener("blur", () => setTimeout(closeExtractionTemplateMenu, 120));
+ui.extractionProfileMenu.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  closeExtractionTemplateMenu();
+  ui.extractionProfile.focus();
+});
 ui.runExtractionButton.addEventListener("click", () => runStructuredExtraction(false));
 ui.rerunExtractionButton.addEventListener("click", () => runStructuredExtraction(true));
 ui.editExtractionButton.addEventListener("click", () => {
@@ -2279,7 +2424,8 @@ document.addEventListener("drop", (event) => {
   event.stopPropagation();
   const files = Array.from(event.dataTransfer.files || []);
   if (!files.length) return;
-  uploadFiles(files);
+  openImportDialog();
+  setPendingUploadFiles(files);
 }, true);
 
 document.addEventListener("dragleave", (event) => {

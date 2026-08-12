@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS documents (
     is_pdf INTEGER NOT NULL CHECK (is_pdf IN (0, 1)),
     num_pages INTEGER NOT NULL DEFAULT 1 CHECK (num_pages > 0),
     current_page INTEGER NOT NULL DEFAULT 1 CHECK (current_page > 0),
+    document_type TEXT,
     checksum TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS document_pages (
     page_number INTEGER NOT NULL CHECK (page_number > 0),
     source_markdown TEXT,
     markdown TEXT NOT NULL DEFAULT '',
+    preprocessing_json TEXT,
     confidence_score REAL CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
     review_status TEXT NOT NULL DEFAULT 'unreviewed'
         CHECK (review_status IN ('unreviewed', 'needs_review', 'approved')),

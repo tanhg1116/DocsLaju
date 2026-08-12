@@ -136,6 +136,7 @@
               </div>
             </div>
             <button class="header-upload-button icon-tooltip" id="uploadButton" aria-label="Upload documents" data-tooltip="Upload documents"><svg class="ui-icon"><use href="#icon-plus"></use></svg></button>
+            <button class="header-markdown-button icon-tooltip active" id="markdownViewButton" aria-label="Show Markdown view" data-tooltip="Show Markdown view" disabled><svg class="ui-icon"><use href="#icon-code"></use></svg></button>
             <button class="header-extract-button icon-tooltip" id="extractButton" aria-label="Extract structured data" data-tooltip="Extract structured document data" disabled><svg class="ui-icon"><use href="#icon-list-checks"></use></svg></button>
             <button class="header-export-button icon-tooltip" id="exportButton" aria-label="Export document" data-tooltip="Export document" disabled><svg class="ui-icon"><use href="#icon-download"></use></svg></button>
           </div>
@@ -265,6 +266,58 @@
             <span class="keyboard-hint">Changes save automatically</span>
           </div>
         </article>
+
+        <article class="pane pane-structured" id="structuredPane" hidden>
+          <form id="extractionForm" novalidate>
+            <div class="pane-title structured-pane-title">
+              <div>
+                <span class="pane-icon green"><svg class="ui-icon"><use href="#icon-list-checks"></use></svg></span>
+                <div>
+                  <h2>Structured Data</h2>
+                  <p id="extractionDocumentLabel">Review extracted fields without changing the Markdown.</p>
+                </div>
+              </div>
+              <div class="structured-title-actions">
+                <span class="badge needs-review" id="extractionStatus" hidden>Needs review</span>
+                <small id="extractionModel"></small>
+              </div>
+            </div>
+
+            <div class="structured-toolbar">
+              <label class="extraction-profile-field">
+                <span>Document type</span>
+                <div class="extraction-template-combobox" id="extractionTemplateCombobox">
+                  <svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+                  <input id="extractionProfile" type="search" role="combobox" autocomplete="off"
+                         placeholder="Search document types…" aria-expanded="false"
+                         aria-controls="extractionProfileMenu" aria-autocomplete="list">
+                  <div class="extraction-template-menu" id="extractionProfileMenu" role="listbox" hidden></div>
+                </div>
+              </label>
+              <p class="modal-status" id="extractionMessage" role="status"></p>
+            </div>
+
+            <div class="structured-scroll">
+              <div class="extraction-empty" id="extractionEmpty">
+                <svg class="ui-icon" aria-hidden="true"><use href="#icon-list-checks"></use></svg>
+                <strong>No structured data yet</strong>
+                <p id="extractionEmptyMessage">Choose a document type to extract its fields and tables.</p>
+                <button class="button button-primary" id="runExtractionButton" type="button">Extract structured data</button>
+              </div>
+              <div class="extraction-editor" id="extractionEditor" hidden>
+                <div id="extractionDynamicFields"></div>
+              </div>
+            </div>
+
+            <div class="pane-actions extraction-actions">
+              <button class="button button-quiet" id="extractionCsv" type="button" hidden>Download CSV</button>
+              <button class="button button-quiet" id="rerunExtractionButton" type="button" hidden>Run again</button>
+              <button class="button button-quiet" id="editExtractionButton" type="button" hidden>Edit</button>
+              <button class="button button-quiet" id="saveExtractionButton" type="button" hidden>Save</button>
+              <button class="button button-primary" id="approveExtractionButton" type="button" hidden>Approve</button>
+            </div>
+          </form>
+        </article>
       </section>
     </main>
   </div>
@@ -317,6 +370,17 @@
         <svg class="ui-icon" aria-hidden="true"><use href="#icon-clipboard"></use></svg>
         <span><strong>Paste image from clipboard</strong><small>Click here or press Ctrl+V while this window is open</small></span>
       </button>
+      <label class="import-document-type" for="importDocumentType">
+        <span>Document type <small>Optional</small></span>
+        <select id="importDocumentType" name="document_type">
+          <option value="">Not sure / General document</option>
+          <option value="invoice">Invoice</option>
+          <option value="receipt">Receipt</option>
+          <option value="quotation">Quotation</option>
+          <option value="resume">CV / Résumé</option>
+        </select>
+        <small>Not sure? Leave this unchanged. OCR still works normally, and you can choose or change the type later. A wrong choice only affects structured fields—not your original file or Markdown.</small>
+      </label>
       <input id="fileInput" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" multiple hidden>
       <p class="modal-status" id="importStatus" role="status"></p>
       <div class="modal-actions">
@@ -356,50 +420,6 @@
       <div class="modal-actions">
         <button class="button button-quiet" id="exportCancel" type="button">Cancel</button>
         <button class="button button-primary" id="exportSubmit" type="submit">Download</button>
-      </div>
-    </form>
-  </dialog>
-
-  <dialog class="extraction-dialog" id="extractionDialog" aria-labelledby="extractionDialogTitle">
-    <form id="extractionForm" method="dialog" novalidate>
-      <div class="modal-header">
-        <span class="modal-icon green" aria-hidden="true"><svg class="ui-icon"><use href="#icon-list-checks"></use></svg></span>
-        <div>
-          <h2 id="extractionDialogTitle">Structured data extraction</h2>
-          <p id="extractionDocumentLabel">Extract reviewable business fields without changing raw Markdown.</p>
-        </div>
-      </div>
-
-      <label class="extraction-profile-field">
-        <span>Template</span>
-        <select id="extractionProfile">
-          <option value="">Choose a document type…</option>
-        </select>
-      </label>
-
-      <div class="extraction-empty" id="extractionEmpty">
-        <svg class="ui-icon" aria-hidden="true"><use href="#icon-list-checks"></use></svg>
-        <strong>No structured data yet</strong>
-        <p id="extractionEmptyMessage">Run the pilot to extract supplier, document number, date, totals, tax and line items.</p>
-        <button class="button button-primary" id="runExtractionButton" type="button">Extract structured data</button>
-      </div>
-
-      <div class="extraction-editor" id="extractionEditor" hidden>
-        <div class="extraction-status-line">
-          <span class="badge needs-review" id="extractionStatus">Needs review</span>
-          <small id="extractionModel"></small>
-        </div>
-        <div id="extractionDynamicFields"></div>
-      </div>
-
-      <p class="modal-status" id="extractionMessage" role="status"></p>
-      <div class="modal-actions extraction-actions">
-        <button class="button button-quiet" id="extractionClose" type="button">Close</button>
-        <button class="button button-quiet" id="extractionCsv" type="button" hidden>Download CSV</button>
-        <button class="button button-quiet" id="rerunExtractionButton" type="button" hidden>Run again</button>
-        <button class="button button-quiet" id="editExtractionButton" type="button" hidden>Edit</button>
-        <button class="button button-quiet" id="saveExtractionButton" type="button" hidden>Save</button>
-        <button class="button button-primary" id="approveExtractionButton" type="button" hidden>Approve</button>
       </div>
     </form>
   </dialog>

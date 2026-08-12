@@ -51,6 +51,7 @@ class OcrMarkdown(str):
     source_markdown: str
     assets: list[dict]
     confidence_score: float | None
+    preprocessing_report: dict | None
 
     def __new__(
         cls,
@@ -59,11 +60,13 @@ class OcrMarkdown(str):
         source_markdown: str,
         assets: list[dict],
         confidence_score: float | None = None,
+        preprocessing_report: dict | None = None,
     ) -> "OcrMarkdown":
         instance = super().__new__(cls, value)
         instance.source_markdown = source_markdown
         instance.assets = assets
         instance.confidence_score = confidence_score
+        instance.preprocessing_report = preprocessing_report
         return instance
 
 
@@ -280,11 +283,17 @@ def ocr_pdf_pages_markdown(pdf_bytes: bytes, *, include_images: bool = True, mod
     return pages_md
 
 
-def ocr_image_with_assets(image_bytes: bytes, *, model: str | None = None) -> OcrPageResult:
+def ocr_image_with_assets(
+    image_bytes: bytes,
+    *,
+    mime_type: str = "image/jpeg",
+    model: str | None = None,
+) -> OcrPageResult:
     """Process an image and return its exact Markdown plus extracted images."""
     client = get_client()
     encoded = base64.b64encode(image_bytes).decode()
-    base64_data_url = f"data:image/jpeg;base64,{encoded}"
+    safe_mime = mime_type if mime_type.startswith("image/") else "image/jpeg"
+    base64_data_url = f"data:{safe_mime};base64,{encoded}"
     log_api("ocr.process:start", extra={"model": model or MODEL_DEFAULT, "type": "image", "bytes": len(image_bytes)})
     ocr_response = client.ocr.process(
         document={"type": "image_url", "image_url": base64_data_url},

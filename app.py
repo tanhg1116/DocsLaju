@@ -40,6 +40,7 @@ from src.extraction_templates import (
 from src.services.database import ADMIN_USER_ID, Database
 from src.services.browser_pdf import BrowserPdfError, render_url_to_pdf
 from src.services.ocr_jobs import OcrJobManager
+from src.services.image_preprocessor import PreprocessedImage, preprocess_image
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -200,6 +201,7 @@ def _prepare_ocr_markdown(
     document: dict,
     page_number: int,
     page: OcrPageResult,
+    preprocessing_report: dict | None = None,
 ) -> OcrMarkdown:
     source_markdown = page.markdown
     editable_markdown = source_markdown
@@ -228,7 +230,44 @@ def _prepare_ocr_markdown(
         source_markdown=source_markdown,
         assets=assets,
         confidence_score=page.confidence_score,
+        preprocessing_report=preprocessing_report,
     )
+
+
+def _preprocessed_document_image(document: dict) -> PreprocessedImage:
+    return preprocess_image(document["content"], str(document["mime_type"]))
+
+
+def _ocr_document_with_template(document: dict, template: dict) -> tuple[list[OcrMarkdown], dict]:
+    content = document["content"]
+    mime_type = str(document["mime_type"])
+    preprocessing_report = None
+    if not document["is_pdf"]:
+        optimized = _preprocessed_document_image(document)
+        content = optimized.content
+        mime_type = optimized.mime_type
+        preprocessing_report = optimized.report
+    combined = ocr_document_with_annotation(
+        content,
+        is_pdf=bool(document["is_pdf"]),
+        mime_type=mime_type,
+        schema_name=f"{template['id']}_v{template['schema_version']}",
+        schema=template["schema"],
+        prompt=template["prompt"],
+        model=MODEL_DEFAULT,
+    )
+    if len(combined.pages) != int(document["num_pages"]):
+        raise RuntimeError("Mistral returned an unexpected number of OCR pages; nothing was saved")
+    pages = [
+        _prepare_ocr_markdown(
+            document,
+            page_number,
+            page,
+            preprocessing_report=preprocessing_report,
+        )
+        for page_number, page in enumerate(combined.pages, start=1)
+    ]
+    return pages, _normalize_template_data(combined.document_annotation, template)
 
 
 def _infer_document_page(document: dict, page_number: int) -> str:
@@ -239,7 +278,18 @@ def _infer_document_page(document: dict, page_number: int) -> str:
         )
         page = pages[0] if pages else OcrPageResult("")
     else:
-        page = ocr_image_with_assets(document["content"], model=MODEL_DEFAULT)
+        optimized = _preprocessed_document_image(document)
+        page = ocr_image_with_assets(
+            optimized.content,
+            mime_type=optimized.mime_type,
+            model=MODEL_DEFAULT,
+        )
+        return _prepare_ocr_markdown(
+            document,
+            page_number,
+            page,
+            preprocessing_report=optimized.report,
+        )
     return _prepare_ocr_markdown(document, page_number, page)
 
 
@@ -344,6 +394,16 @@ def _template_from_request(template_id: str) -> dict:
         return get_template(template_id)
     except KeyError as exc:
         raise NotFound("Extraction template not found") from exc
+
+
+def _optional_template(template_id: object) -> dict | None:
+    value = str(template_id or "").strip()
+    if not value:
+        return None
+    try:
+        return get_template(value)
+    except KeyError as exc:
+        raise BadRequest("Unknown document type") from exc
 
 
 def _extraction_payload(extraction: dict | None, template: dict) -> dict:
@@ -513,8 +573,12 @@ def upload_file(session_id: str) -> tuple[Response, int]:
     if not content:
         raise BadRequest("The uploaded file is empty")
     is_pdf = extension == ".pdf" or upload.mimetype == "application/pdf"
+    template = _optional_template(request.form.get("document_type"))
+    document_type = template["id"] if template else None
     duplicate = _db().find_document_by_checksum(ADMIN_USER_ID, session_id, content)
     if duplicate:
+        if document_type is not None:
+            _db().set_document_type(ADMIN_USER_ID, session_id, str(duplicate["id"]), document_type)
         _db().activate_document(ADMIN_USER_ID, session_id, str(duplicate["id"]))
         payload = _state()
         payload["upload"] = {
@@ -531,10 +595,24 @@ def upload_file(session_id: str) -> tuple[Response, int]:
         mime_type=upload.mimetype or ("application/pdf" if is_pdf else "image/jpeg"),
         is_pdf=is_pdf,
         num_pages=_page_count(content, is_pdf),
+        document_type=document_type,
     )
     payload = _state()
     payload["upload"] = {"duplicate": False, "message": f"{name} uploaded"}
     return jsonify(payload), 201
+
+
+@app.patch("/api/sessions/<session_id>/files/<file_id>/document-type")
+def update_document_type(session_id: str, file_id: str) -> Response:
+    _document(session_id, file_id)
+    template = _optional_template((request.get_json(silent=True) or {}).get("document_type"))
+    _db().set_document_type(
+        ADMIN_USER_ID,
+        session_id,
+        file_id,
+        template["id"] if template else None,
+    )
+    return jsonify(_state())
 
 
 @app.post("/api/sessions/<session_id>/files/<file_id>/activate")
@@ -655,6 +733,14 @@ def run_document_extraction(session_id: str, file_id: str, template_id: str) -> 
     page_owner_token = f"structured-{secrets.token_hex(8)}"
     ocr_included = False
     try:
+        ocr_content = document["content"]
+        ocr_mime_type = str(document["mime_type"])
+        preprocessing_report = None
+        if not document["is_pdf"]:
+            optimized = _preprocessed_document_image(document)
+            ocr_content = optimized.content
+            ocr_mime_type = optimized.mime_type
+            preprocessing_report = optimized.report
         has_existing_ocr = _db().count_document_ocr_pages(file_id) > 0
         if not has_existing_ocr:
             if _db().get_active_ocr_job(ADMIN_USER_ID, file_id):
@@ -665,9 +751,9 @@ def run_document_extraction(session_id: str, file_id: str, template_id: str) -> 
                 claimed_pages.append(page_number)
 
             combined = ocr_document_with_annotation(
-                document["content"],
+                ocr_content,
                 is_pdf=bool(document["is_pdf"]),
-                mime_type=str(document["mime_type"]),
+                mime_type=ocr_mime_type,
                 schema_name=f"{template['id']}_v{template['schema_version']}",
                 schema=template["schema"],
                 prompt=template["prompt"],
@@ -683,16 +769,21 @@ def run_document_extraction(session_id: str, file_id: str, template_id: str) -> 
             except KeyError as exc:
                 raise NotFound("Document was deleted while OCR was running") from exc
             for page_number, page in enumerate(combined.pages, start=1):
-                prepared = _prepare_ocr_markdown(document, page_number, page)
+                prepared = _prepare_ocr_markdown(
+                    document,
+                    page_number,
+                    page,
+                    preprocessing_report=preprocessing_report,
+                )
                 _db().save_page_markdown(file_id, page_number, prepared)
             ocr_included = True
         else:
             # Existing Markdown may contain user edits. Preserve it exactly and
             # request only the annotation instead of replacing page content.
             result = extract_document_annotation(
-                document["content"],
+                ocr_content,
                 is_pdf=bool(document["is_pdf"]),
-                mime_type=str(document["mime_type"]),
+                mime_type=ocr_mime_type,
                 schema_name=f"{template['id']}_v{template['schema_version']}",
                 schema=template["schema"],
                 prompt=template["prompt"],
@@ -788,6 +879,50 @@ def run_ocr(session_id: str, file_id: str, page_number: int) -> Response:
 
     force = bool((request.get_json(silent=True) or {}).get("force"))
     result = _db().get_page_markdown(file_id, page_number)
+    template = _optional_template(document.get("document_type"))
+    extraction = (
+        _db().get_document_extraction(ADMIN_USER_ID, session_id, file_id, template["id"])
+        if template else None
+    )
+    can_combine = (
+        result is None
+        and not force
+        and template is not None
+        and extraction is None
+        and _db().count_document_ocr_pages(file_id) == 0
+        and int(document["num_pages"]) <= DOCUMENT_ANNOTATION_PAGE_LIMIT
+    )
+    if can_combine:
+        owner_token = f"typed-{secrets.token_hex(8)}"
+        claimed_pages: list[int] = []
+        extraction_claimed = False
+        try:
+            if not _db().claim_document_extraction(file_id, template["id"]):
+                raise Conflict("Structured extraction is already running for this document")
+            extraction_claimed = True
+            for claimed_page in range(1, int(document["num_pages"]) + 1):
+                if not _db().claim_ocr_page(file_id, claimed_page, owner_token):
+                    raise Conflict(f"Page {claimed_page} is already being processed")
+                claimed_pages.append(claimed_page)
+            prepared_pages, normalized = _ocr_document_with_template(document, template)
+            _db().get_document(ADMIN_USER_ID, session_id, file_id)
+            for claimed_page, prepared in enumerate(prepared_pages, start=1):
+                _db().save_page_markdown(file_id, claimed_page, prepared)
+            extraction = _db().save_document_extraction(
+                ADMIN_USER_ID,
+                session_id,
+                file_id,
+                template["id"],
+                normalized,
+                MODEL_DEFAULT,
+                schema_version=template["schema_version"],
+            )
+            result = prepared_pages[page_number - 1]
+        finally:
+            for claimed_page in claimed_pages:
+                _db().release_ocr_page(file_id, claimed_page, owner_token)
+            if extraction_claimed:
+                _db().release_document_extraction(file_id, template["id"])
     if result is None or force:
         owner_token = f"manual-{secrets.token_hex(8)}"
         if not _db().claim_ocr_page(file_id, page_number, owner_token):
@@ -801,7 +936,7 @@ def run_ocr(session_id: str, file_id: str, page_number: int) -> Response:
             _db().save_page_markdown(file_id, page_number, result)
         finally:
             _db().release_ocr_page(file_id, page_number, owner_token)
-    return jsonify({"markdown": result, "model": MODEL_DEFAULT})
+    return jsonify({"markdown": result, "model": MODEL_DEFAULT, "extraction": extraction})
 
 
 @app.post("/api/sessions/<session_id>/files/<file_id>/ocr-all")

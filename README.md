@@ -17,12 +17,15 @@ This branch transitions the UI from Streamlit to a custom Flask frontend while p
 - Rename, pin, archive, move, and delete session actions
 - Collapsible sidebar with the preference retained in the browser
 - Header document picker with per-document deletion and an adjacent multi-file upload dialog
+- Optional, reassuring document-type choice during upload; typed first-time OCR
+  returns Markdown and structured fields together in one Mistral request
 - Drag-and-drop PDF/image upload directly onto the preview pane
 - Non-blocking automatic OCR toggle with a configurable page range, progress, and immediate queue cancellation
 - Workspace-wide OCR text search with direct page navigation and result highlighting
 - Per-page review states for approval and follow-up, including OCR confidence indicators
 - Restart-resilient OCR jobs, failed-page retry, and duplicate-upload detection
-- Template-driven Invoice, Receipt, and CV/Résumé extraction with editable fields, tables, approval, and CSV export
+- Template-driven Invoice, Receipt, Quotation, and CV/Résumé extraction with editable fields, tables, approval, and CSV export
+- Markdown/structured workspace switcher that keeps the original document preview visible
 - SQLite persistence for sessions, uploads, and per-page OCR edits
 - Per-page OCR and editing with `mistral-ocr-latest`
 - Markdown ZIP, rendered PDF, and combined Markdown + PDF ZIP exports
@@ -131,9 +134,14 @@ The complete database repository tree and relationship diagram are in
   be retried without reprocessing pages that already completed.
 - Uploads are hashed with SHA-256; selecting the same file twice in one session
   reopens the stored document instead of duplicating it or paying for OCR again.
+- Image uploads are inspected locally before OCR. Orientation correction,
+  confident page/browser-border cropping, deskewing, low-resolution upscaling,
+  denoising, contrast adjustment, and light sharpening run only when their
+  measured thresholds are met. The original upload is preserved, and the UI
+  reports every action applied to the temporary OCR input.
 - Deleting a document cascades to all of its extracted asset rows.
 - Structured extraction is opened from the green button in the document header.
-  Choose the versioned Invoice, Receipt, or CV/Résumé template. On a new document
+  Choose the versioned Invoice, Receipt, Quotation, or CV/Résumé template. On a new document
   (up to eight pages), one Mistral OCR request returns both page Markdown and
   schema-validated structured data. The reusable UI renders fields and tables
   from the trusted template layout; missing scalar values stay `null` in SQLite

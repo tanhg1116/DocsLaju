@@ -168,6 +168,102 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
             "lists": [{"key": "review_notes", "label": "Review notes"}],
         },
     },
+    "quotation": {
+        "id": "quotation",
+        "label": "Quotation",
+        "description": "Supplier proposal, customer details, validity, terms, totals, and quoted items.",
+        "schema_version": 1,
+        "prompt": COMMON_PROMPT + (
+            " The selected document type is quotation. Preserve quotation references and item "
+            "codes as text. Extract validity, payment, delivery, and warranty terms only when "
+            "explicitly printed. Line-item and total amounts must match the document without "
+            "recalculation."
+        ),
+        "schema": _object({
+            "document_type": {"type": "string", "enum": ["quotation"]},
+            "supplier_name": _nullable("string"),
+            "supplier_registration_number": _nullable("string"),
+            "supplier_address": _nullable("string"),
+            "supplier_contact": _nullable("string"),
+            "customer_name": _nullable("string"),
+            "customer_address": _nullable("string"),
+            "quotation_number": _nullable("string"),
+            "quotation_date": _nullable("string"),
+            "valid_until": _nullable("string"),
+            "subject": _nullable("string"),
+            "currency": _nullable("string"),
+            "subtotal": _nullable("number"),
+            "discount_amount": _nullable("number"),
+            "tax_amount": _nullable("number"),
+            "total_amount": _nullable("number"),
+            "payment_terms": _nullable("string"),
+            "delivery_terms": _nullable("string"),
+            "warranty_terms": _nullable("string"),
+            "quoted_items": _array({
+                "item_code": _nullable("string"),
+                "description": _nullable("string"),
+                "quantity": _nullable("number"),
+                "unit": _nullable("string"),
+                "unit_price": _nullable("number"),
+                "discount_amount": _nullable("number"),
+                "tax_amount": _nullable("number"),
+                "amount": _nullable("number"),
+            }),
+            "review_notes": {"type": "array", "items": {"type": "string"}},
+        }),
+        "layout": {
+            "sections": [
+                {
+                    "title": "Quotation details",
+                    "fields": [
+                        {"key": "supplier_name", "label": "Supplier", "type": "text"},
+                        {"key": "supplier_registration_number", "label": "Registration number", "type": "text"},
+                        {"key": "supplier_address", "label": "Supplier address", "type": "long_text"},
+                        {"key": "supplier_contact", "label": "Supplier contact", "type": "text"},
+                        {"key": "customer_name", "label": "Customer", "type": "text"},
+                        {"key": "customer_address", "label": "Customer address", "type": "long_text"},
+                        {"key": "quotation_number", "label": "Quotation number", "type": "text"},
+                        {"key": "quotation_date", "label": "Quotation date", "type": "date"},
+                        {"key": "valid_until", "label": "Valid until", "type": "date"},
+                        {"key": "subject", "label": "Subject / project", "type": "long_text"},
+                        {"key": "currency", "label": "Currency", "type": "text"},
+                    ],
+                },
+                {
+                    "title": "Commercial terms",
+                    "fields": [
+                        {"key": "payment_terms", "label": "Payment terms", "type": "long_text"},
+                        {"key": "delivery_terms", "label": "Delivery terms", "type": "long_text"},
+                        {"key": "warranty_terms", "label": "Warranty terms", "type": "long_text"},
+                    ],
+                },
+                {
+                    "title": "Totals",
+                    "fields": [
+                        {"key": "subtotal", "label": "Subtotal", "type": "number"},
+                        {"key": "discount_amount", "label": "Discount", "type": "number"},
+                        {"key": "tax_amount", "label": "Tax", "type": "number"},
+                        {"key": "total_amount", "label": "Total", "type": "number"},
+                    ],
+                },
+            ],
+            "tables": [{
+                "key": "quoted_items",
+                "title": "Quoted items",
+                "columns": [
+                    {"key": "item_code", "label": "Item code", "type": "text"},
+                    {"key": "description", "label": "Description", "type": "text"},
+                    {"key": "quantity", "label": "Qty", "type": "number"},
+                    {"key": "unit", "label": "Unit", "type": "text"},
+                    {"key": "unit_price", "label": "Unit price", "type": "number"},
+                    {"key": "discount_amount", "label": "Discount", "type": "number"},
+                    {"key": "tax_amount", "label": "Tax", "type": "number"},
+                    {"key": "amount", "label": "Amount", "type": "number"},
+                ],
+            }],
+            "lists": [{"key": "review_notes", "label": "Review notes"}],
+        },
+    },
     "resume": {
         "id": "resume",
         "label": "CV / Résumé",

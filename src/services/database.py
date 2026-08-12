@@ -52,6 +52,8 @@ class Database:
             }
             if "checksum" not in document_columns:
                 connection.execute("ALTER TABLE documents ADD COLUMN checksum TEXT")
+            if "document_type" not in document_columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN document_type TEXT")
             columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(ocr_job_pages)").fetchall()
@@ -66,6 +68,8 @@ class Database:
             }
             if "source_markdown" not in page_columns:
                 connection.execute("ALTER TABLE document_pages ADD COLUMN source_markdown TEXT")
+            if "preprocessing_json" not in page_columns:
+                connection.execute("ALTER TABLE document_pages ADD COLUMN preprocessing_json TEXT")
             if "confidence_score" not in page_columns:
                 connection.execute("ALTER TABLE document_pages ADD COLUMN confidence_score REAL")
             if "review_status" not in page_columns:
@@ -408,6 +412,7 @@ class Database:
         mime_type: str,
         is_pdf: bool,
         num_pages: int,
+        document_type: str | None = None,
     ) -> str:
         self.get_session(user_id, session_id)
         document_id = self._id()
@@ -416,10 +421,13 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO documents
-                    (id, session_id, name, content, mime_type, is_pdf, num_pages, checksum)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, session_id, name, content, mime_type, is_pdf, num_pages, document_type, checksum)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (document_id, session_id, name, content, mime_type, int(is_pdf), num_pages, checksum),
+                (
+                    document_id, session_id, name, content, mime_type, int(is_pdf),
+                    num_pages, document_type, checksum,
+                ),
             )
             connection.execute(
                 """
@@ -434,6 +442,22 @@ class Database:
                 (session_id, user_id),
             )
         return document_id
+
+    def set_document_type(
+        self,
+        user_id: int,
+        session_id: str,
+        document_id: str,
+        document_type: str | None,
+    ) -> None:
+        self.get_document(user_id, session_id, document_id)
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE documents SET document_type = ? WHERE id = ? AND session_id = ?",
+                (document_type, document_id, session_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("Document not found")
 
     def find_document_by_checksum(
         self,
@@ -521,6 +545,12 @@ class Database:
         source_markdown = getattr(markdown, "source_markdown", None)
         assets = getattr(markdown, "assets", None)
         confidence_score = getattr(markdown, "confidence_score", None)
+        preprocessing_report = getattr(markdown, "preprocessing_report", None)
+        preprocessing_json = (
+            json.dumps(preprocessing_report, ensure_ascii=False, separators=(",", ":"))
+            if preprocessing_report is not None
+            else None
+        )
         is_ocr_result = source_markdown is not None
         needs_review = not editable_markdown.strip() or (
             confidence_score is not None and float(confidence_score) < 0.80
@@ -530,12 +560,16 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO document_pages
-                    (document_id, page_number, source_markdown, markdown,
+                    (document_id, page_number, source_markdown, markdown, preprocessing_json,
                      confidence_score, review_status, reviewed_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
                 ON CONFLICT(document_id, page_number) DO UPDATE SET
                     source_markdown = COALESCE(excluded.source_markdown, document_pages.source_markdown),
                     markdown = excluded.markdown,
+                    preprocessing_json = CASE
+                        WHEN excluded.source_markdown IS NOT NULL THEN excluded.preprocessing_json
+                        ELSE document_pages.preprocessing_json
+                    END,
                     confidence_score = CASE
                         WHEN excluded.source_markdown IS NOT NULL THEN excluded.confidence_score
                         ELSE document_pages.confidence_score
@@ -549,6 +583,7 @@ class Database:
                     page_number,
                     source_markdown,
                     editable_markdown,
+                    preprocessing_json,
                     confidence_score,
                     review_status,
                 ),
@@ -1194,6 +1229,7 @@ class Database:
                         "is_pdf": bool(document_row["is_pdf"]),
                         "num_pages": document_row["num_pages"],
                         "current_page": document_row["current_page"],
+                        "document_type": document_row["document_type"],
                         "completed_pages": [row["page_number"] for row in completed],
                         "approved_pages": [
                             row["page_number"] for row in completed
@@ -1224,7 +1260,7 @@ class Database:
                         page = document["current_page"]
                         page_row = connection.execute(
                             """
-                            SELECT markdown, confidence_score, review_status, reviewed_at
+                            SELECT markdown, preprocessing_json, confidence_score, review_status, reviewed_at
                             FROM document_pages
                             WHERE document_id = ? AND page_number = ?
                             """,
@@ -1236,8 +1272,14 @@ class Database:
                             "is_pdf": bool(document["is_pdf"]),
                             "num_pages": document["num_pages"],
                             "current_page": page,
+                            "document_type": document["document_type"],
                             "markdown": page_row["markdown"] if page_row else "",
                             "has_ocr": page_row is not None,
+                            "ocr_preprocessing": (
+                                json.loads(page_row["preprocessing_json"])
+                                if page_row and page_row["preprocessing_json"]
+                                else None
+                            ),
                             "confidence_score": page_row["confidence_score"] if page_row else None,
                             "review_status": page_row["review_status"] if page_row else None,
                             "reviewed_at": page_row["reviewed_at"] if page_row else None,
