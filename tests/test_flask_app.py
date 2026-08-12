@@ -16,6 +16,7 @@ def test_schema_contains_the_persistent_repository(isolated_database: Path):
     expected = {
         "users", "projects", "sessions", "documents", "document_pages", "user_preferences",
         "document_assets", "ocr_jobs", "ocr_job_pages", "ocr_page_claims",
+        "document_pages_fts",
     }
     with sqlite3.connect(isolated_database) as connection:
         tables = {
@@ -32,6 +33,70 @@ def test_schema_contains_the_persistent_repository(isolated_database: Path):
             row[1] for row in connection.execute("PRAGMA table_info(document_pages)")
         }
         assert "source_markdown" in page_columns
+        assert {"confidence_score", "review_status", "reviewed_at"} <= page_columns
+        document_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(documents)")
+        }
+        assert "checksum" in document_columns
+
+
+def test_search_opens_the_matching_page_and_review_status_resets_after_edit(isolated_database: Path):
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        uploaded = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(b"searchable-image"), "searchable.png")},
+            content_type="multipart/form-data",
+        ).get_json()
+        document_id = uploaded["active_document"]["id"]
+        client.patch(
+            f"/api/sessions/{session_id}/files/{document_id}/markdown/1",
+            json={"markdown": "Unique searchable sentinel 73921"},
+        )
+
+        search = client.get("/api/search?q=searchable%20sentinel")
+        assert search.status_code == 200
+        result = search.get_json()["results"][0]
+        assert result["document_id"] == document_id
+        assert result["page_number"] == 1
+
+        opened = client.post("/api/search/open", json=result)
+        assert opened.status_code == 200
+        assert opened.get_json()["active_document"]["id"] == document_id
+
+        approved = client.patch(
+            f"/api/sessions/{session_id}/files/{document_id}/review/1",
+            json={"status": "approved"},
+        )
+        assert approved.get_json()["review_status"] == "approved"
+        assert client.get("/api/state").get_json()["active_document"]["review_status"] == "approved"
+
+        client.patch(
+            f"/api/sessions/{session_id}/files/{document_id}/markdown/1",
+            json={"markdown": "Edited searchable sentinel"},
+        )
+        assert client.get("/api/state").get_json()["active_document"]["review_status"] == "unreviewed"
+
+
+def test_duplicate_upload_is_reused_within_a_session(isolated_database: Path):
+    content = b"same-document-content"
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        first = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(content), "first.png")},
+            content_type="multipart/form-data",
+        )
+        second = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(content), "renamed-copy.png")},
+            content_type="multipart/form-data",
+        )
+        assert first.status_code == 201
+        assert second.status_code == 200
+        payload = second.get_json()
+        assert payload["upload"]["duplicate"] is True
+        assert len(payload["sessions"][0]["files"]) == 1
 
 
 def test_initial_state_has_one_session():
@@ -122,6 +187,10 @@ def test_sidebar_exposes_projects_and_complete_session_menu():
             b'id="importDialog"',
             b'id="importClipboardButton"',
             b'id="exportDialog"',
+            b'id="workspaceSearchInput"',
+            b'id="needsReviewButton"',
+            b'id="approvePageButton"',
+            b'id="retryBatchButton"',
             b'value="markdown"',
             b'value="pdf"',
             b'value="bundle"',
@@ -156,6 +225,9 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         assert b"function setIconButton" in script.data
         assert b"navigator.clipboard.read" in script.data
         assert b'ui.importDialog.addEventListener("paste"' in script.data
+        assert b'document.addEventListener("paste"' in script.data
+        assert b"function pastedImageFiles" in script.data
+        assert b"Ctrl+V" in page.data
         assert b"function formatNumberedEquations" in script.data
         assert b"formatNumberedEquations(ui.renderedContent)" in script.data
         assert b"function normalizeRenderedLists" in script.data
@@ -419,6 +491,41 @@ def test_page_claim_is_atomic_and_prevents_duplicate_inference(isolated_database
     assert database.claim_ocr_page(document_id, 1, "worker-b") is False
     database.release_ocr_page(document_id, 1, "worker-a")
     assert database.claim_ocr_page(document_id, 1, "worker-b") is True
+
+
+def test_unfinished_queue_is_resumable_and_failed_pages_can_be_retried(isolated_database: Path):
+    database = app.extensions["database"]
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        document_id = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(b"queue-image"), "queue.png")},
+            content_type="multipart/form-data",
+        ).get_json()["active_document"]["id"]
+
+    job_id = database.create_ocr_job(ADMIN_USER_ID, session_id, document_id)
+    database.mark_ocr_job_running(job_id)
+    assert database.dequeue_next_ocr_job_page(job_id)["page_number"] == 1
+
+    resumable = database.recover_interrupted_ocr_jobs()
+    assert [job["id"] for job in resumable] == [job_id]
+    resumed = database.get_ocr_job(ADMIN_USER_ID, job_id)
+    assert resumed["status"] == "queued"
+    assert resumed["pages"][0]["status"] == "queued"
+
+    database.mark_ocr_job_running(job_id)
+    assert database.dequeue_next_ocr_job_page(job_id)["page_number"] == 1
+    database.mark_ocr_job_page(job_id, 1, "failed", "temporary upstream error")
+    assert database.finalize_ocr_job_if_idle(job_id) is True
+    retry_id = database.retry_failed_ocr_job(ADMIN_USER_ID, job_id)
+    retry = database.get_ocr_job(ADMIN_USER_ID, retry_id)
+    assert retry["status"] == "queued"
+    assert retry["pages"] == [{
+        "page_number": 1,
+        "priority": 0,
+        "status": "queued",
+        "error": None,
+    }]
 
 
 def test_ocr_all_runs_in_background_and_kill_switch_discards_inflight_result(monkeypatch):

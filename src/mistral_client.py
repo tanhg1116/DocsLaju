@@ -35,6 +35,7 @@ class OcrImageResult:
 class OcrPageResult:
     markdown: str
     images: tuple[OcrImageResult, ...] = ()
+    confidence_score: float | None = None
 
 
 class OcrMarkdown(str):
@@ -42,6 +43,7 @@ class OcrMarkdown(str):
 
     source_markdown: str
     assets: list[dict]
+    confidence_score: float | None
 
     def __new__(
         cls,
@@ -49,11 +51,26 @@ class OcrMarkdown(str):
         *,
         source_markdown: str,
         assets: list[dict],
+        confidence_score: float | None = None,
     ) -> "OcrMarkdown":
         instance = super().__new__(cls, value)
         instance.source_markdown = source_markdown
         instance.assets = assets
+        instance.confidence_score = confidence_score
         return instance
+
+
+def _page_confidence(page: Any) -> float | None:
+    scores = getattr(page, "confidence_scores", None)
+    value = (
+        scores.get("average_page_confidence_score")
+        if isinstance(scores, dict)
+        else getattr(scores, "average_page_confidence_score", None)
+    )
+    try:
+        return max(0.0, min(1.0, float(value))) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_api_key() -> str:
@@ -221,6 +238,7 @@ def ocr_pdf_pages_with_assets(
         document={"type": "document_url", "document_url": signed_url.url},
         model=model or MODEL_DEFAULT,
         include_image_base64=include_images,
+        confidence_scores_granularity="page",
     )
     log_api("ocr.process:ok", extra={"pages": len(getattr(ocr_response, "pages", []) or [])})
 
@@ -231,7 +249,13 @@ def ocr_pdf_pages_with_assets(
             for image in (getattr(page, "images", None) or [])
             if getattr(image, "id", None) and getattr(image, "image_base64", None)
         )
-        pages.append(OcrPageResult(str(getattr(page, "markdown", "")), images))
+        pages.append(
+            OcrPageResult(
+                str(getattr(page, "markdown", "")),
+                images,
+                _page_confidence(page),
+            )
+        )
     return pages
 
 
@@ -259,6 +283,7 @@ def ocr_image_with_assets(image_bytes: bytes, *, model: str | None = None) -> Oc
         document={"type": "image_url", "image_url": base64_data_url},
         model=model or MODEL_DEFAULT,
         include_image_base64=True,
+        confidence_scores_granularity="page",
     )
     log_api("ocr.process:ok", extra={"pages": len(getattr(ocr_response, "pages", []) or [])})
     if not ocr_response.pages:
@@ -269,7 +294,11 @@ def ocr_image_with_assets(image_bytes: bytes, *, model: str | None = None) -> Oc
         for image in (getattr(page, "images", None) or [])
         if getattr(image, "id", None) and getattr(image, "image_base64", None)
     )
-    return OcrPageResult(str(getattr(page, "markdown", "")), images)
+    return OcrPageResult(
+        str(getattr(page, "markdown", "")),
+        images,
+        _page_confidence(page),
+    )
 
 
 def ocr_image_markdown(image_bytes: bytes, *, model: str | None = None) -> str:

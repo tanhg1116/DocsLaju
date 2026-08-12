@@ -41,6 +41,9 @@
     <symbol id="icon-clipboard" viewBox="0 0 24 24"><rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></symbol>
     <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0 2 5M20 4v7h-7"/></symbol>
     <symbol id="icon-user-round" viewBox="0 0 24 24"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="icon-flag" viewBox="0 0 24 24"><path d="M5 22V4M5 4c5-4 9 4 14 0v10c-5 4-9-4-14 0"/></symbol>
+    <symbol id="icon-circle-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
   </svg>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
@@ -72,6 +75,14 @@
         <span>New OCR session</span>
         <kbd>N</kbd>
       </button>
+
+      <div class="workspace-search" id="workspaceSearch">
+        <label for="workspaceSearchInput">
+          <svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+          <input id="workspaceSearchInput" type="search" autocomplete="off" placeholder="Search OCR text" aria-label="Search all OCR text">
+        </label>
+        <div class="search-results" id="searchResults" role="listbox" hidden></div>
+      </div>
 
       <div class="sidebar-scroll">
         <section class="sidebar-section">
@@ -172,7 +183,7 @@
             <div class="empty-state" id="documentEmpty">
               <div class="empty-icon"><svg class="ui-icon"><use href="#icon-upload"></use></svg></div>
               <h3>Bring in a document</h3>
-              <p>Upload a PDF or image to start extracting clean Markdown.</p>
+              <p>Drop a file here or press <kbd>Ctrl+V</kbd> to paste an image directly.</p>
               <button class="button button-primary" id="emptyUploadButton">Upload documents</button>
               <small>PDF, PNG, JPG or WEBP · up to 30 MB</small>
             </div>
@@ -194,6 +205,8 @@
               </div>
             </div>
             <div class="rendered-title-actions">
+              <button class="review-action-button needs-review icon-tooltip" id="needsReviewButton" aria-label="Mark page as needing review" data-tooltip="Mark page as needing review" disabled><svg class="ui-icon"><use href="#icon-flag"></use></svg></button>
+              <button class="review-action-button approve icon-tooltip" id="approvePageButton" aria-label="Approve this page" data-tooltip="Approve this page" disabled><svg class="ui-icon"><use href="#icon-circle-check"></use></svg></button>
               <button class="document-ocr-button icon-tooltip" id="ocrButton" aria-label="Run OCR on this page" data-tooltip="Run OCR on this page" disabled><svg class="ui-icon"><use href="#icon-scan-text"></use></svg></button>
               <span class="badge" id="ocrBadge">Waiting</span>
             </div>
@@ -223,6 +236,10 @@
             <div class="batch-progress" id="batchProgress" hidden>
               <div><span id="batchProgressLabel">Preparing selected pages…</span><strong id="batchProgressCount">0 / 0</strong></div>
               <div class="batch-progress-track"><span id="batchProgressBar"></span></div>
+            </div>
+            <div class="batch-recovery" id="batchRecovery" hidden>
+              <span id="batchError">Some pages could not be processed.</span>
+              <button class="icon-button icon-tooltip" id="retryBatchButton" type="button" aria-label="Retry failed OCR pages" data-tooltip="Retry failed OCR pages"><svg class="ui-icon"><use href="#icon-refresh"></use></svg></button>
             </div>
           </div>
         </article>
@@ -292,6 +309,7 @@
           <small>PDF, PNG, JPG or WEBP · up to 30 MB each</small>
         </span>
       </button>
+
       <div class="import-choice-divider"><span>or</span></div>
       <button class="import-clipboard-button" id="importClipboardButton" type="button">
         <svg class="ui-icon" aria-hidden="true"><use href="#icon-clipboard"></use></svg>

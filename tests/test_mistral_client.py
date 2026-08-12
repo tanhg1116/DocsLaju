@@ -31,6 +31,7 @@ def test_pdf_ocr_requests_markdown_without_layout_blocks(monkeypatch):
     assert result == ["# Embedded result"]
     assert fake.ocr.calls[0]["model"] == "mistral-ocr-latest"
     assert fake.ocr.calls[0]["document"]["type"] == "document_url"
+    assert fake.ocr.calls[0]["confidence_scores_granularity"] == "page"
     assert "include_blocks" not in fake.ocr.calls[0]
 
 
@@ -44,6 +45,7 @@ def test_image_ocr_requests_markdown_without_layout_blocks(monkeypatch):
     assert result == "Image result"
     assert fake.ocr.calls[0]["model"] == "mistral-ocr-latest"
     assert fake.ocr.calls[0]["document"]["type"] == "image_url"
+    assert fake.ocr.calls[0]["confidence_scores_granularity"] == "page"
     assert "include_blocks" not in fake.ocr.calls[0]
 
 
@@ -52,7 +54,11 @@ def test_asset_aware_ocr_keeps_exact_markdown_and_image_payload(monkeypatch):
         id="figure.jpeg",
         image_base64="data:image/jpeg;base64,aW1hZ2U=",
     )
-    page = SimpleNamespace(markdown="![figure](figure.jpeg)", images=[image])
+    page = SimpleNamespace(
+        markdown="![figure](figure.jpeg)",
+        images=[image],
+        confidence_scores=SimpleNamespace(average_page_confidence_score=0.93),
+    )
     fake = SimpleNamespace(files=FakeFiles(), ocr=FakeOcr([page]))
     monkeypatch.setattr(mistral_client, "get_client", lambda: fake)
 
@@ -61,6 +67,7 @@ def test_asset_aware_ocr_keeps_exact_markdown_and_image_payload(monkeypatch):
     assert result[0].markdown == "![figure](figure.jpeg)"
     assert result[0].images[0].source_ref == "figure.jpeg"
     assert result[0].images[0].data_url == "data:image/jpeg;base64,aW1hZ2U="
+    assert result[0].confidence_score == 0.93
 
 
 def test_structured_markdown_keeps_table_and_display_math_lines_intact():

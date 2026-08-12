@@ -23,6 +23,7 @@ users
 ├── sessions
 │   └── documents
 │       ├── document_pages
+│       │   └── document_pages_fts (search index)
 │       ├── document_assets
 │       ├── ocr_jobs
 │       │   └── ocr_job_pages
@@ -36,20 +37,26 @@ users
   state are stored on the session.
 - Uploaded file bytes are stored in `documents` for this local testing phase.
 - OCR Markdown is stored per document page, so edits survive a Flask restart.
+- Page rows also store OCR confidence and a review state: `unreviewed`,
+  `needs_review`, or `approved`. Editing an approved page returns it to review.
+- `document_pages_fts` is an SQLite FTS5 index synchronized by triggers. Search
+  results retain the owning session, document, and page for direct navigation.
 - Extracted document objects are stored as BLOBs in `document_assets`. Each row
   belongs to a session, document, and page; Markdown uses portable
   `assets/{filename}` references instead of embedded data URLs.
 - `document_pages.source_markdown` preserves the OCR response while `markdown`
   holds the editable version with short asset references.
-- Batch progress is stored in `ocr_jobs` and `ocr_job_pages`. Incomplete jobs are
-  marked `interrupted` when Flask restarts because an upstream HTTP call cannot
-  survive the Python process.
+- Batch progress is stored in `ocr_jobs` and `ocr_job_pages`. A page whose HTTP
+  request was interrupted is returned to the queue when Flask restarts; completed
+  pages remain completed, and cancelled jobs remain cancelled.
 - Every job page has a numeric priority. The worker atomically dequeues by
   `priority DESC, page_number ASC`, allowing a manually requested current page to
   jump ahead of the remaining automatic queue without duplicating work.
 - `ocr_page_claims` has a `(document_id, page_number)` primary key. Manual and
   batch OCR must acquire it atomically before calling Mistral, preventing duplicate
   inference for the same page.
+- `documents.checksum` stores a SHA-256 digest used to avoid duplicate uploads
+  within one session.
 - Deleting a session cascades to its documents and page results.
 - Deleting a document cascades to its Markdown, extracted assets, jobs, job
   pages, and page claims.

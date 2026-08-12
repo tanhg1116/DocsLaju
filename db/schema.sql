@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS documents (
     is_pdf INTEGER NOT NULL CHECK (is_pdf IN (0, 1)),
     num_pages INTEGER NOT NULL DEFAULT 1 CHECK (num_pages > 0),
     current_page INTEGER NOT NULL DEFAULT 1 CHECK (current_page > 0),
+    checksum TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -53,11 +54,44 @@ CREATE TABLE IF NOT EXISTS document_pages (
     page_number INTEGER NOT NULL CHECK (page_number > 0),
     source_markdown TEXT,
     markdown TEXT NOT NULL DEFAULT '',
+    confidence_score REAL CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
+    review_status TEXT NOT NULL DEFAULT 'unreviewed'
+        CHECK (review_status IN ('unreviewed', 'needs_review', 'approved')),
+    reviewed_at TEXT,
     processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (document_id, page_number),
     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
+
+-- Search index for OCR text. Triggers keep it synchronized with page edits while
+-- the source of truth remains document_pages.
+CREATE VIRTUAL TABLE IF NOT EXISTS document_pages_fts USING fts5(
+    document_id UNINDEXED,
+    page_number UNINDEXED,
+    markdown,
+    tokenize = 'unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS document_pages_fts_insert
+AFTER INSERT ON document_pages BEGIN
+    INSERT INTO document_pages_fts (document_id, page_number, markdown)
+    VALUES (new.document_id, new.page_number, new.markdown);
+END;
+
+CREATE TRIGGER IF NOT EXISTS document_pages_fts_update
+AFTER UPDATE OF markdown ON document_pages BEGIN
+    DELETE FROM document_pages_fts
+    WHERE document_id = old.document_id AND page_number = old.page_number;
+    INSERT INTO document_pages_fts (document_id, page_number, markdown)
+    VALUES (new.document_id, new.page_number, new.markdown);
+END;
+
+CREATE TRIGGER IF NOT EXISTS document_pages_fts_delete
+AFTER DELETE ON document_pages BEGIN
+    DELETE FROM document_pages_fts
+    WHERE document_id = old.document_id AND page_number = old.page_number;
+END;
 
 CREATE TABLE IF NOT EXISTS document_assets (
     id TEXT PRIMARY KEY,

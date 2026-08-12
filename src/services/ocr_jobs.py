@@ -26,6 +26,9 @@ class OcrJobManager:
             daemon=True,
         )
         with self._lock:
+            existing = self._workers.get(job_id)
+            if existing and existing[0].is_alive():
+                return
             self._workers[job_id] = (worker, cancellation, str(job["document_id"]))
         worker.start()
 

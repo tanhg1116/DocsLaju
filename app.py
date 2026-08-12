@@ -55,7 +55,6 @@ app.config.update(
     ).rstrip("/"),
 )
 app.extensions["database"] = Database(app.config["DATABASE"], BASE_DIR / "db" / "schema.sql")
-app.extensions["database"].recover_interrupted_ocr_jobs()
 app.extensions["ocr_jobs"] = OcrJobManager()
 
 
@@ -220,6 +219,7 @@ def _prepare_ocr_markdown(
         editable_markdown,
         source_markdown=source_markdown,
         assets=assets,
+        confidence_score=page.confidence_score,
     )
 
 
@@ -235,6 +235,19 @@ def _infer_document_page(document: dict, page_number: int) -> str:
     return _prepare_ocr_markdown(document, page_number, page)
 
 
+def _resume_pending_ocr_jobs() -> None:
+    for job in _db().recover_interrupted_ocr_jobs():
+        _job_manager().start(
+            _db(),
+            int(job["user_id"]),
+            str(job["id"]),
+            _infer_document_page,
+        )
+
+
+_resume_pending_ocr_jobs()
+
+
 @app.get("/")
 def index() -> str:
     _db().ensure_active_session(ADMIN_USER_ID)
@@ -243,6 +256,41 @@ def index() -> str:
 
 @app.get("/api/state")
 def get_state() -> Response:
+    return jsonify(_state())
+
+
+@app.get("/api/search")
+def search_workspace() -> Response:
+    query = str(request.args.get("q", "")).strip()
+    if len(query) > 200:
+        raise BadRequest("Search is limited to 200 characters")
+    try:
+        results = _db().search_pages(ADMIN_USER_ID, query)
+    except sqlite3.OperationalError as exc:
+        raise BadRequest("Could not parse that search") from exc
+    return jsonify({"query": query, "results": results})
+
+
+@app.post("/api/search/open")
+def open_search_result() -> Response:
+    payload = request.get_json(silent=True) or {}
+    session_id = str(payload.get("session_id", ""))
+    document_id = str(payload.get("document_id", ""))
+    try:
+        page_number = int(payload.get("page_number", 0))
+    except (TypeError, ValueError) as exc:
+        raise BadRequest("A valid page number is required") from exc
+    try:
+        _db().open_search_result(
+            ADMIN_USER_ID,
+            session_id,
+            document_id,
+            page_number,
+        )
+    except KeyError as exc:
+        raise NotFound("Search result no longer exists") from exc
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from exc
     return jsonify(_state())
 
 
@@ -352,6 +400,16 @@ def upload_file(session_id: str) -> tuple[Response, int]:
     if not content:
         raise BadRequest("The uploaded file is empty")
     is_pdf = extension == ".pdf" or upload.mimetype == "application/pdf"
+    duplicate = _db().find_document_by_checksum(ADMIN_USER_ID, session_id, content)
+    if duplicate:
+        _db().activate_document(ADMIN_USER_ID, session_id, str(duplicate["id"]))
+        payload = _state()
+        payload["upload"] = {
+            "duplicate": True,
+            "document_id": duplicate["id"],
+            "message": f"{duplicate['name']} is already in this session",
+        }
+        return jsonify(payload), 200
     _db().add_document(
         ADMIN_USER_ID,
         session_id,
@@ -361,7 +419,9 @@ def upload_file(session_id: str) -> tuple[Response, int]:
         is_pdf=is_pdf,
         num_pages=_page_count(content, is_pdf),
     )
-    return jsonify(_state()), 201
+    payload = _state()
+    payload["upload"] = {"duplicate": False, "message": f"{name} uploaded"}
+    return jsonify(payload), 201
 
 
 @app.post("/api/sessions/<session_id>/files/<file_id>/activate")
@@ -539,6 +599,22 @@ def prioritize_ocr_job_page(job_id: str, page_number: int) -> Response:
         raise Conflict(str(exc)) from exc
 
 
+@app.post("/api/ocr-jobs/<job_id>/retry")
+def retry_ocr_job(job_id: str) -> tuple[Response, int]:
+    try:
+        current = _db().get_ocr_job(ADMIN_USER_ID, job_id)
+        if current["status"] in {"queued", "running", "cancelling"}:
+            return jsonify(current), 202
+        retry_id = _db().retry_failed_ocr_job(ADMIN_USER_ID, job_id)
+        retry_job = _db().get_ocr_job(ADMIN_USER_ID, retry_id)
+    except KeyError as exc:
+        raise NotFound("OCR job not found") from exc
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        raise Conflict(str(exc)) from exc
+    _job_manager().start(_db(), ADMIN_USER_ID, retry_id, _infer_document_page)
+    return jsonify(retry_job), 202
+
+
 @app.delete("/api/ocr-jobs/<job_id>")
 def cancel_ocr_job(job_id: str) -> tuple[Response, int]:
     try:
@@ -557,6 +633,28 @@ def update_markdown(session_id: str, file_id: str, page_number: int) -> Response
     source = str((request.get_json(silent=True) or {}).get("markdown", ""))
     _db().save_page_markdown(file_id, page_number, source)
     return jsonify({"ok": True})
+
+
+@app.patch("/api/sessions/<session_id>/files/<file_id>/review/<int:page_number>")
+def update_page_review(session_id: str, file_id: str, page_number: int) -> Response:
+    status = str((request.get_json(silent=True) or {}).get("status", "")).strip()
+    try:
+        page = _db().set_page_review_status(
+            ADMIN_USER_ID,
+            session_id,
+            file_id,
+            page_number,
+            status,
+        )
+    except KeyError as exc:
+        raise NotFound("Document not found") from exc
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from exc
+    return jsonify({
+        "ok": True,
+        "review_status": page.get("review_status"),
+        "reviewed_at": page.get("reviewed_at"),
+    })
 
 
 @app.post("/api/render")

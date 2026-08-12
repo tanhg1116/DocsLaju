@@ -19,6 +19,9 @@ This branch transitions the UI from Streamlit to a custom Flask frontend while p
 - Header document picker with per-document deletion and an adjacent multi-file upload dialog
 - Drag-and-drop PDF/image upload directly onto the preview pane
 - Non-blocking automatic OCR toggle with a configurable page range, progress, and immediate queue cancellation
+- Workspace-wide OCR text search with direct page navigation and result highlighting
+- Per-page review states for approval and follow-up, including OCR confidence indicators
+- Restart-resilient OCR jobs, failed-page retry, and duplicate-upload detection
 - SQLite persistence for sessions, uploads, and per-page OCR edits
 - Per-page OCR and editing with `mistral-ocr-latest`
 - Markdown ZIP, rendered PDF, and combined Markdown + PDF ZIP exports
@@ -64,7 +67,7 @@ Then open <http://127.0.0.1:5000>.
 ## Test
 
 ```powershell
-python -m pytest -q
+python -m pytest tests -q
 ```
 
 The route tests do not call Mistral. Live OCR requires a valid `MISTRAL_API_KEY`.
@@ -82,7 +85,8 @@ src/
 ├── mistral_client.py          Mistral SDK integration
 └── services/
     ├── browser_pdf.py         Installed-browser PDF rendering
-    └── database.py            SQLite repository
+    ├── database.py            SQLite repository and full-text search
+    └── ocr_jobs.py            Persistent prioritized OCR worker
 templates/index.html           Three-pane application shell
 static/app.css                 Responsive visual design
 static/app.js                  Sidebar, upload, OCR, editor, and export behavior
@@ -122,6 +126,10 @@ The complete database repository tree and relationship diagram are in
   next.
 - SQLite page claims prevent manual and batch requests from processing the same
   document page concurrently.
+- Active OCR queues resume after a Flask restart. Failed or cancelled pages can
+  be retried without reprocessing pages that already completed.
+- Uploads are hashed with SHA-256; selecting the same file twice in one session
+  reopens the stored document instead of duplicating it or paying for OCR again.
 - Deleting a document cascades to all of its extracted asset rows.
 - The existing OpenAI dependency is retained for future restoration of AI-generated filenames, but it is not used by this Flask draft.
 

@@ -7,6 +7,8 @@ const ui = {
   unfiledDropZone: document.querySelector("#unfiledDropZone"),
   archiveToggle: document.querySelector("#archiveToggle"),
   newProjectButton: document.querySelector("#newProjectButton"),
+  workspaceSearchInput: document.querySelector("#workspaceSearchInput"),
+  searchResults: document.querySelector("#searchResults"),
   adminName: document.querySelector("#adminName"),
   adminAvatar: document.querySelector("#adminAvatar"),
   sessionMenu: document.querySelector("#sessionMenu"),
@@ -47,6 +49,8 @@ const ui = {
   wordCount: document.querySelector("#wordCount"),
   ocrBadge: document.querySelector("#ocrBadge"),
   ocrButton: document.querySelector("#ocrButton"),
+  needsReviewButton: document.querySelector("#needsReviewButton"),
+  approvePageButton: document.querySelector("#approvePageButton"),
   autoOcrControl: document.querySelector("#autoOcrControl"),
   autoOcrToggle: document.querySelector("#autoOcrToggle"),
   autoOcrDialog: document.querySelector("#autoOcrDialog"),
@@ -62,6 +66,9 @@ const ui = {
   batchProgressLabel: document.querySelector("#batchProgressLabel"),
   batchProgressCount: document.querySelector("#batchProgressCount"),
   batchProgressBar: document.querySelector("#batchProgressBar"),
+  batchRecovery: document.querySelector("#batchRecovery"),
+  batchError: document.querySelector("#batchError"),
+  retryBatchButton: document.querySelector("#retryBatchButton"),
   exportButton: document.querySelector("#exportButton"),
   exportDialog: document.querySelector("#exportDialog"),
   exportForm: document.querySelector("#exportForm"),
@@ -105,6 +112,9 @@ let jobPollTimer = null;
 let lastJobCompleted = 0;
 let manualOcrContext = null;
 let pendingUploadFiles = [];
+let searchTimer = null;
+let searchGeneration = 0;
+let searchHighlight = null;
 const expandedProjects = new Set();
 
 function iconMarkup(name, extraClass = "") {
@@ -327,6 +337,73 @@ function sessionById(id) {
   return state.sessions.find((item) => item.id === id) || null;
 }
 
+function searchTerms(value) {
+  return [...new Set((value.match(/[\p{L}\p{N}]+/gu) || []).map((term) => term.toLocaleLowerCase()))].slice(0, 12);
+}
+
+function renderSearchResults(results, query) {
+  ui.searchResults.replaceChildren();
+  ui.searchResults.hidden = false;
+  if (!results.length) {
+    const empty = document.createElement("div");
+    empty.className = "search-results-empty";
+    empty.textContent = "No OCR text matched";
+    ui.searchResults.append(empty);
+    return;
+  }
+  for (const result of results) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "search-result";
+    button.setAttribute("role", "option");
+    const title = document.createElement("strong");
+    title.textContent = result.document_name;
+    const location = document.createElement("small");
+    location.textContent = `${result.project_name ? `${result.project_name} · ` : ""}${result.session_title} · page ${result.page_number}`;
+    const excerpt = document.createElement("span");
+    excerpt.textContent = result.excerpt || "Matching OCR page";
+    button.append(title, location, excerpt);
+    button.addEventListener("click", async () => {
+      try {
+        searchHighlight = {
+          documentId: result.document_id,
+          pageNumber: result.page_number,
+          terms: searchTerms(query),
+        };
+        state = await api("/api/search/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(result),
+        });
+        ui.searchResults.hidden = true;
+        renderState();
+        closeSidebar();
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    });
+    ui.searchResults.append(button);
+  }
+}
+
+async function runWorkspaceSearch(query) {
+  const generation = ++searchGeneration;
+  if (!query.trim()) {
+    ui.searchResults.hidden = true;
+    ui.searchResults.replaceChildren();
+    return;
+  }
+  try {
+    const payload = await api(`/api/search?q=${encodeURIComponent(query.trim())}`);
+    if (generation !== searchGeneration || ui.workspaceSearchInput.value.trim() !== query.trim()) return;
+    renderSearchResults(payload.results, query);
+  } catch (error) {
+    if (generation !== searchGeneration) return;
+    ui.searchResults.hidden = true;
+    toast(error.message, "error");
+  }
+}
+
 async function patchSession(id, payload, successMessage = "") {
   try {
     const previousActiveId = state.active_session_id;
@@ -503,7 +580,7 @@ function renderProjects(activeSessions) {
 function renderSessions() {
   closeMenus();
   ui.adminName.textContent = state.user?.display_name || "Admin User";
-  ui.adminAvatar.textContent = (state.user?.display_name || "A").trim().charAt(0).toUpperCase();
+  ui.adminAvatar.title = state.user?.display_name || "Admin User";
   const activeSessions = state.sessions.filter((item) => !item.is_archived);
   const unfiled = activeSessions.filter((item) => !item.project_id);
   const archived = state.sessions.filter((item) => item.is_archived);
@@ -595,6 +672,10 @@ function updateBatchControls(job) {
   jobPollTimer = null;
   const document = activeDocument();
   const active = job && ["queued", "running", "cancelling"].includes(job.status);
+  const recoverable = Boolean(
+    job && !active && ["failed", "interrupted", "cancelled"].includes(job.status) &&
+    ((job.failed_pages || 0) + (job.cancelled_pages || 0) > 0)
+  );
   const automaticOn = Boolean(job && ["queued", "running"].includes(job.status));
   ui.autoOcrToggle.checked = automaticOn;
   ui.autoOcrToggle.disabled = !document || job?.status === "cancelling";
@@ -604,8 +685,17 @@ function updateBatchControls(job) {
     : automaticOn
       ? "Automatic OCR is on — switch off to stop"
       : "Automatic OCR is off — switch on to choose pages";
-  ui.batchStatusArea.hidden = !active;
+  ui.batchStatusArea.hidden = !active && !recoverable;
   ui.batchProgress.hidden = !active;
+  ui.batchRecovery.hidden = !recoverable;
+
+  if (recoverable) {
+    const count = (job.failed_pages || 0) + (job.cancelled_pages || 0);
+    ui.batchError.textContent = `${count} page${count === 1 ? "" : "s"} did not finish. Retry only those pages.`;
+    ui.retryBatchButton.dataset.jobId = job.id;
+  } else {
+    delete ui.retryBatchButton.dataset.jobId;
+  }
 
   if (!active) {
     activeJobId = null;
@@ -640,6 +730,37 @@ function updateBatchControls(job) {
     ui.fileStatus.textContent = `Batch OCR · page ${document.current_page}`;
   }
   jobPollTimer = setTimeout(() => pollOcrJob(job.id), 800);
+}
+
+function updateReviewControls(document) {
+  const available = Boolean(document?.has_ocr);
+  const status = document?.review_status || "unreviewed";
+  ui.needsReviewButton.disabled = !available;
+  ui.approvePageButton.disabled = !available;
+  ui.needsReviewButton.classList.toggle("active", available && status === "needs_review");
+  ui.approvePageButton.classList.toggle("active", available && status === "approved");
+  setIconButton(
+    ui.needsReviewButton,
+    status === "needs_review" ? "Clear needs-review flag" : "Mark page as needing review",
+    "flag",
+  );
+  setIconButton(
+    ui.approvePageButton,
+    status === "approved" ? "Return page to review" : "Approve this page",
+    "circle-check",
+  );
+  if (!available) return;
+  const labels = {
+    approved: ["Approved", "badge complete"],
+    needs_review: ["Needs review", "badge needs-review"],
+    unreviewed: ["Review", "badge"],
+  };
+  const [label, className] = labels[status] || labels.unreviewed;
+  ui.ocrBadge.textContent = label;
+  ui.ocrBadge.className = className;
+  ui.ocrBadge.title = document.confidence_score == null
+    ? ""
+    : `OCR confidence ${Math.round(document.confidence_score * 100)}%`;
 }
 
 function updateWords(value) {
@@ -802,6 +923,63 @@ function normalizeRenderedLists(root) {
   formatLetteredSubparts(root);
 }
 
+function activeSearchTerms() {
+  const document = activeDocument();
+  if (!searchHighlight || !document) return [];
+  if (searchHighlight.documentId !== document.id || searchHighlight.pageNumber !== document.current_page) return [];
+  return searchHighlight.terms || [];
+}
+
+function highlightRenderedSearch(root) {
+  const terms = activeSearchTerms();
+  if (!terms.length) return;
+  const escaped = terms
+    .sort((left, right) => right.length - left.length)
+    .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const pattern = new RegExp(`(${escaped.join("|")})`, "giu");
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (node.parentElement?.closest("mark, .katex, code, pre")) continue;
+    if (pattern.test(node.textContent || "")) nodes.push(node);
+    pattern.lastIndex = 0;
+  }
+  for (const node of nodes) {
+    const parts = (node.textContent || "").split(pattern);
+    const fragment = document.createDocumentFragment();
+    for (const part of parts) {
+      if (!part) continue;
+      if (terms.some((term) => term.toLocaleLowerCase() === part.toLocaleLowerCase())) {
+        const mark = document.createElement("mark");
+        mark.className = "search-highlight";
+        mark.textContent = part;
+        fragment.append(mark);
+      } else {
+        fragment.append(document.createTextNode(part));
+      }
+    }
+    node.replaceWith(fragment);
+  }
+  root.querySelector("mark.search-highlight")?.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function selectEditorSearchMatch() {
+  const terms = activeSearchTerms();
+  if (!terms.length) return;
+  const source = ui.markdownEditor.value.toLocaleLowerCase();
+  const matches = terms
+    .map((term) => ({ term, index: source.indexOf(term) }))
+    .filter((match) => match.index >= 0)
+    .sort((left, right) => left.index - right.index);
+  if (!matches.length) return;
+  const match = matches[0];
+  requestAnimationFrame(() => {
+    ui.markdownEditor.focus({ preventScroll: true });
+    ui.markdownEditor.setSelectionRange(match.index, match.index + match.term.length);
+  });
+}
+
 function renderMarkdown(value) {
   clearTimeout(renderTimer);
   const generation = ++renderGeneration;
@@ -825,6 +1003,7 @@ function renderMarkdown(value) {
       renderMath(ui.renderedContent);
       normalizeRenderedLists(ui.renderedContent);
       formatNumberedEquations(ui.renderedContent);
+      highlightRenderedSearch(ui.renderedContent);
     } catch (error) {
       if (generation !== renderGeneration) return;
       toast(error.message, "error");
@@ -856,6 +1035,8 @@ function renderState({ refreshPreview = true } = {}) {
     ui.copyButton.disabled = true;
     ui.ocrBadge.textContent = "Waiting";
     ui.ocrBadge.className = "badge";
+    ui.ocrBadge.removeAttribute("title");
+    updateReviewControls(null);
     updateWords("");
     renderMarkdown("");
     setOcrLoading(false);
@@ -882,14 +1063,16 @@ function renderState({ refreshPreview = true } = {}) {
   ui.copyButton.disabled = !document.markdown;
   ui.ocrBadge.textContent = document.has_ocr ? "Complete" : "Ready";
   ui.ocrBadge.className = `badge${document.has_ocr ? " complete" : ""}`;
+  updateReviewControls(document);
   updateWords(document.markdown);
   renderMarkdown(document.markdown);
+  selectEditorSearchMatch();
   const manualIsCurrent = manualOcrContext &&
     manualOcrContext.sessionId === session.id &&
     manualOcrContext.documentId === document.id &&
     manualOcrContext.pageNumber === document.current_page;
   setOcrLoading(Boolean(manualIsCurrent), document.current_page);
-  updateBatchControls(state.active_ocr_job);
+  updateBatchControls(state.active_ocr_job || state.recent_ocr_job);
   if (refreshPreview) loadPreview();
 }
 
@@ -931,6 +1114,8 @@ async function uploadFiles(files) {
   const session = activeSession();
   if (!session) return false;
   let uploaded = 0;
+  let duplicates = 0;
+  let lastWasNew = false;
   try {
     setBusy(true, "Uploading…");
     ui.fileStatus.textContent = "Uploading";
@@ -938,15 +1123,19 @@ async function uploadFiles(files) {
       const form = new FormData();
       form.append("file", file);
       state = await api(`/api/sessions/${session.id}/files`, { method: "POST", body: form });
-      uploaded += 1;
-      ui.importStatus.textContent = `Uploaded ${uploaded} of ${selectedFiles.length}…`;
+      lastWasNew = !state.upload?.duplicate;
+      if (lastWasNew) uploaded += 1;
+      else duplicates += 1;
+      ui.importStatus.textContent = `Checked ${uploaded + duplicates} of ${selectedFiles.length}…`;
     }
     renderState();
-    toast(uploaded === 1 ? `${selectedFiles[0].name} uploaded` : `${uploaded} documents uploaded`);
-    setTimeout(() => runOcr(), 0);
+    if (duplicates && !uploaded) toast("That document is already in this session");
+    else if (duplicates) toast(`${uploaded} uploaded · ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped`);
+    else toast(uploaded === 1 ? `${selectedFiles[0].name} uploaded` : `${uploaded} documents uploaded`);
+    if (lastWasNew) setTimeout(() => runOcr(), 0);
     return true;
   } catch (error) {
-    if (uploaded) renderState();
+    if (uploaded || duplicates) renderState();
     ui.importStatus.textContent = error.message;
     ui.importStatus.classList.add("error");
     toast(error.message, "error");
@@ -1177,11 +1366,14 @@ function saveMarkdown(value) {
   if (!document) return;
   document.markdown = value;
   document.has_ocr = true;
+  document.review_status = "unreviewed";
+  document.reviewed_at = null;
   markdownDirty = true;
   updateWords(value);
   renderMarkdown(value);
   ui.copyButton.disabled = !value;
   ui.exportButton.disabled = false;
+  updateReviewControls(document);
   ui.saveState.textContent = "Unsaved";
   const saveUrl = routeForDocument(`/markdown/${document.current_page}`);
   saveTimer = setTimeout(async () => {
@@ -1216,7 +1408,46 @@ async function savePendingMarkdown() {
     body: JSON.stringify({ markdown: value }),
   });
   markdownDirty = false;
+  document.review_status = "unreviewed";
+  document.reviewed_at = null;
+  updateReviewControls(document);
   ui.saveState.textContent = "Saved";
+}
+
+async function setPageReviewStatus(status) {
+  const document = activeDocument();
+  if (!document?.has_ocr) return;
+  try {
+    await savePendingMarkdown();
+    const result = await api(routeForDocument(`/review/${document.current_page}`), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    document.review_status = result.review_status;
+    document.reviewed_at = result.reviewed_at;
+    updateReviewControls(document);
+    toast(status === "approved" ? `Page ${document.current_page} approved` : status === "needs_review" ? `Page ${document.current_page} flagged for review` : `Page ${document.current_page} returned to review`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function retryFailedOcrPages() {
+  const jobId = ui.retryBatchButton.dataset.jobId;
+  if (!jobId) return;
+  try {
+    ui.retryBatchButton.disabled = true;
+    const job = await api(`/api/ocr-jobs/${jobId}/retry`, { method: "POST" });
+    state.active_ocr_job = job;
+    state.recent_ocr_job = job;
+    updateBatchControls(job);
+    toast(`Retrying ${job.total_pages} page${job.total_pages === 1 ? "" : "s"}`);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    ui.retryBatchButton.disabled = false;
+  }
 }
 
 function openImportDialog() {
@@ -1253,6 +1484,24 @@ function clipboardImageFile(blob) {
   }[blob.type] || "png";
   const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "");
   return new File([blob], `clipboard-${timestamp}.${extension}`, { type: blob.type || "image/png" });
+}
+
+function pastedImageFiles(event) {
+  const clipboard = event.clipboardData;
+  if (!clipboard) return [];
+  const candidates = [...(clipboard.files || [])];
+  for (const item of [...(clipboard.items || [])]) {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (file && !candidates.includes(file)) candidates.push(file);
+  }
+  return candidates
+    .filter((file) => file.type.startsWith("image/"))
+    .map(clipboardImageFile);
+}
+
+function isTextInputTarget(target) {
+  return target instanceof Element && Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
 }
 
 async function readClipboardImage() {
@@ -1467,6 +1716,7 @@ makeDropTarget(ui.sessionList, null);
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".context-menu, .session-menu-button, .project-menu-button")) closeMenus();
   if (!event.target.closest("#documentPicker")) closeDocumentMenu();
+  if (!event.target.closest("#workspaceSearch")) ui.searchResults.hidden = true;
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeMenus();
@@ -1483,19 +1733,37 @@ ui.importFilePicker.addEventListener("click", () => ui.fileInput.click());
 ui.fileInput.addEventListener("change", () => {
   setPendingUploadFiles(ui.fileInput.files);
 });
+
+ui.workspaceSearchInput.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  const query = ui.workspaceSearchInput.value;
+  searchTimer = setTimeout(() => runWorkspaceSearch(query), 220);
+});
+ui.workspaceSearchInput.addEventListener("focus", () => {
+  if (ui.workspaceSearchInput.value.trim() && ui.searchResults.childElementCount) {
+    ui.searchResults.hidden = false;
+  }
+});
 ui.importClipboardButton.addEventListener("click", readClipboardImage);
 ui.importDialog.addEventListener("paste", (event) => {
-  const pastedImages = [...(event.clipboardData?.files || [])]
-    .filter((file) => file.type.startsWith("image/"));
+  const pastedImages = pastedImageFiles(event);
   if (!pastedImages.length) {
     ui.importStatus.textContent = "The clipboard does not contain an image";
     ui.importStatus.classList.add("error");
     return;
   }
   event.preventDefault();
-  const images = pastedImages.map((file) => clipboardImageFile(file));
   ui.fileInput.value = "";
-  setPendingUploadFiles(images, images.length === 1 ? `${images[0].name} · pasted image` : `${images.length} pasted images`);
+  setPendingUploadFiles(pastedImages, pastedImages.length === 1 ? `${pastedImages[0].name} · pasted image` : `${pastedImages.length} pasted images`);
+});
+
+document.addEventListener("paste", (event) => {
+  if (activeDocument() || ui.importDialog.open || ui.importDialog.hasAttribute("open") || isTextInputTarget(event.target)) return;
+  const images = pastedImageFiles(event);
+  if (!images.length) return;
+  event.preventDefault();
+  toast(images.length === 1 ? "Pasting clipboard image…" : `Pasting ${images.length} clipboard images…`);
+  uploadFiles(images);
 });
 ui.importCancel.addEventListener("click", closeImportDialog);
 ui.importForm.addEventListener("submit", async (event) => {
@@ -1526,6 +1794,15 @@ ui.previousPage.addEventListener("click", () => changePage(activeDocument().curr
 ui.nextPage.addEventListener("click", () => changePage(activeDocument().current_page + 1));
 ui.pageNumber.addEventListener("change", () => changePage(ui.pageNumber.value));
 ui.ocrButton.addEventListener("click", runOcr);
+ui.needsReviewButton.addEventListener("click", () => {
+  const status = activeDocument()?.review_status === "needs_review" ? "unreviewed" : "needs_review";
+  setPageReviewStatus(status);
+});
+ui.approvePageButton.addEventListener("click", () => {
+  const status = activeDocument()?.review_status === "approved" ? "unreviewed" : "approved";
+  setPageReviewStatus(status);
+});
+ui.retryBatchButton.addEventListener("click", retryFailedOcrPages);
 ui.autoOcrToggle.addEventListener("change", () => {
   if (ui.autoOcrToggle.checked) openAutoOcrDialog();
   else cancelAllOcr();

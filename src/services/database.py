@@ -45,6 +45,12 @@ class Database:
         schema = self.schema_path.read_text(encoding="utf-8")
         with self.connect() as connection:
             connection.executescript(schema)
+            document_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+            }
+            if "checksum" not in document_columns:
+                connection.execute("ALTER TABLE documents ADD COLUMN checksum TEXT")
             columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(ocr_job_pages)").fetchall()
@@ -59,6 +65,34 @@ class Database:
             }
             if "source_markdown" not in page_columns:
                 connection.execute("ALTER TABLE document_pages ADD COLUMN source_markdown TEXT")
+            if "confidence_score" not in page_columns:
+                connection.execute("ALTER TABLE document_pages ADD COLUMN confidence_score REAL")
+            if "review_status" not in page_columns:
+                connection.execute(
+                    "ALTER TABLE document_pages ADD COLUMN review_status TEXT NOT NULL DEFAULT 'unreviewed'"
+                )
+            if "reviewed_at" not in page_columns:
+                connection.execute("ALTER TABLE document_pages ADD COLUMN reviewed_at TEXT")
+            for row in connection.execute(
+                "SELECT id, content FROM documents WHERE checksum IS NULL"
+            ).fetchall():
+                connection.execute(
+                    "UPDATE documents SET checksum = ? WHERE id = ?",
+                    (hashlib.sha256(bytes(row["content"])).hexdigest(), row["id"]),
+                )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_documents_session_checksum
+                ON documents (session_id, checksum) WHERE checksum IS NOT NULL
+                """
+            )
+            connection.execute("DELETE FROM document_pages_fts")
+            connection.execute(
+                """
+                INSERT INTO document_pages_fts (document_id, page_number, markdown)
+                SELECT document_id, page_number, markdown FROM document_pages
+                """
+            )
             self._migrate_embedded_assets(connection)
         self.ensure_active_session(ADMIN_USER_ID)
 
@@ -367,13 +401,15 @@ class Database:
     ) -> str:
         self.get_session(user_id, session_id)
         document_id = self._id()
+        checksum = hashlib.sha256(content).hexdigest()
         with self.transaction() as connection:
             connection.execute(
                 """
-                INSERT INTO documents (id, session_id, name, content, mime_type, is_pdf, num_pages)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO documents
+                    (id, session_id, name, content, mime_type, is_pdf, num_pages, checksum)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (document_id, session_id, name, content, mime_type, int(is_pdf), num_pages),
+                (document_id, session_id, name, content, mime_type, int(is_pdf), num_pages, checksum),
             )
             connection.execute(
                 """
@@ -388,6 +424,25 @@ class Database:
                 (session_id, user_id),
             )
         return document_id
+
+    def find_document_by_checksum(
+        self,
+        user_id: int,
+        session_id: str,
+        content: bytes,
+    ) -> dict | None:
+        checksum = hashlib.sha256(content).hexdigest()
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT d.* FROM documents d
+                JOIN sessions s ON s.id = d.session_id
+                WHERE d.session_id = ? AND d.checksum = ? AND s.user_id = ?
+                LIMIT 1
+                """,
+                (session_id, checksum, user_id),
+            ).fetchone()
+        return dict(row) if row else None
 
     def get_document(self, user_id: int, session_id: str, document_id: str) -> dict:
         with self.connect() as connection:
@@ -435,21 +490,50 @@ class Database:
             ).fetchone()
         return str(row["markdown"]) if row else None
 
+    def get_page(self, document_id: str, page_number: int) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM document_pages WHERE document_id = ? AND page_number = ?",
+                (document_id, page_number),
+            ).fetchone()
+        return dict(row) if row else None
+
     def save_page_markdown(self, document_id: str, page_number: int, markdown: str) -> None:
         editable_markdown = str(markdown)
         source_markdown = getattr(markdown, "source_markdown", None)
         assets = getattr(markdown, "assets", None)
+        confidence_score = getattr(markdown, "confidence_score", None)
+        is_ocr_result = source_markdown is not None
+        needs_review = not editable_markdown.strip() or (
+            confidence_score is not None and float(confidence_score) < 0.80
+        )
+        review_status = "needs_review" if is_ocr_result and needs_review else "unreviewed"
         with self.transaction() as connection:
             connection.execute(
                 """
-                INSERT INTO document_pages (document_id, page_number, source_markdown, markdown)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO document_pages
+                    (document_id, page_number, source_markdown, markdown,
+                     confidence_score, review_status, reviewed_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL)
                 ON CONFLICT(document_id, page_number) DO UPDATE SET
                     source_markdown = COALESCE(excluded.source_markdown, document_pages.source_markdown),
                     markdown = excluded.markdown,
+                    confidence_score = CASE
+                        WHEN excluded.source_markdown IS NOT NULL THEN excluded.confidence_score
+                        ELSE document_pages.confidence_score
+                    END,
+                    review_status = excluded.review_status,
+                    reviewed_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (document_id, page_number, source_markdown, editable_markdown),
+                (
+                    document_id,
+                    page_number,
+                    source_markdown,
+                    editable_markdown,
+                    confidence_score,
+                    review_status,
+                ),
             )
             if assets is not None:
                 document = connection.execute(
@@ -492,6 +576,95 @@ class Database:
                 (document_id,),
             )
 
+    def set_page_review_status(
+        self,
+        user_id: int,
+        session_id: str,
+        document_id: str,
+        page_number: int,
+        status: str,
+    ) -> dict:
+        if status not in {"unreviewed", "needs_review", "approved"}:
+            raise ValueError("Unknown review status")
+        document = self.get_document(user_id, session_id, document_id)
+        if page_number < 1 or page_number > int(document["num_pages"]):
+            raise ValueError("Page is outside this document")
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE document_pages
+                SET review_status = ?,
+                    reviewed_at = CASE WHEN ? = 'approved' THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE document_id = ? AND page_number = ?
+                """,
+                (status, status, document_id, page_number),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Run OCR on this page before reviewing it")
+        return self.get_page(document_id, page_number) or {}
+
+    @staticmethod
+    def _fts_query(query: str) -> str:
+        tokens = re.findall(r"[^\W_]+", query, flags=re.UNICODE)
+        return " AND ".join(f'"{token}"*' for token in tokens[:12])
+
+    def search_pages(self, user_id: int, query: str, limit: int = 30) -> list[dict]:
+        fts_query = self._fts_query(query)
+        if not fts_query:
+            return []
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT s.id AS session_id, s.title AS session_title,
+                       p.name AS project_name, d.id AS document_id,
+                       d.name AS document_name, CAST(f.page_number AS INTEGER) AS page_number,
+                       snippet(document_pages_fts, 2, '', '', ' … ', 24) AS excerpt,
+                       dp.review_status, dp.confidence_score
+                FROM document_pages_fts f
+                JOIN documents d ON d.id = f.document_id
+                JOIN sessions s ON s.id = d.session_id
+                LEFT JOIN projects p ON p.id = s.project_id
+                JOIN document_pages dp
+                  ON dp.document_id = f.document_id
+                 AND dp.page_number = CAST(f.page_number AS INTEGER)
+                WHERE document_pages_fts MATCH ? AND s.user_id = ?
+                ORDER BY bm25(document_pages_fts), s.updated_at DESC
+                LIMIT ?
+                """,
+                (fts_query, user_id, max(1, min(int(limit), 100))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def open_search_result(
+        self,
+        user_id: int,
+        session_id: str,
+        document_id: str,
+        page_number: int,
+    ) -> None:
+        document = self.get_document(user_id, session_id, document_id)
+        if page_number < 1 or page_number > int(document["num_pages"]):
+            raise ValueError("Page is outside this document")
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE documents SET current_page = ? WHERE id = ?",
+                (page_number, document_id),
+            )
+            connection.execute(
+                """
+                UPDATE sessions
+                SET active_document_id = ?, updated_at = CURRENT_TIMESTAMP,
+                    last_opened_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ?
+                """,
+                (document_id, session_id, user_id),
+            )
+            connection.execute(
+                "UPDATE user_preferences SET active_session_id = ? WHERE user_id = ?",
+                (session_id, user_id),
+            )
+
     def get_document_asset(
         self,
         user_id: int,
@@ -531,25 +704,57 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def recover_interrupted_ocr_jobs(self) -> None:
-        """Release claims that cannot survive a Python process restart."""
+    def recover_interrupted_ocr_jobs(self) -> list[dict]:
+        """Reset unfinished work to a resumable queue after a process restart."""
         with self.transaction() as connection:
-            connection.execute(
-                """
-                UPDATE ocr_job_pages SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP,
-                    error = COALESCE(error, 'Application restarted')
-                WHERE status IN ('queued', 'running')
-                  AND job_id IN (SELECT id FROM ocr_jobs WHERE status IN ('queued', 'running', 'cancelling'))
-                """
-            )
-            connection.execute(
-                """
-                UPDATE ocr_jobs SET status = 'interrupted', cancel_requested = 1,
-                    error = COALESCE(error, 'Application restarted'), finished_at = CURRENT_TIMESTAMP
-                WHERE status IN ('queued', 'running', 'cancelling')
-                """
-            )
             connection.execute("DELETE FROM ocr_page_claims")
+            connection.execute(
+                """
+                UPDATE ocr_job_pages
+                SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP,
+                    error = COALESCE(error, 'Cancelled before application restart')
+                WHERE status IN ('queued', 'running')
+                  AND job_id IN (
+                      SELECT id FROM ocr_jobs
+                      WHERE status = 'cancelling' OR cancel_requested = 1
+                  )
+                """
+            )
+            connection.execute(
+                """
+                UPDATE ocr_jobs
+                SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP
+                WHERE status = 'cancelling' OR
+                      (status IN ('queued', 'running') AND cancel_requested = 1)
+                """
+            )
+            resumable = connection.execute(
+                """
+                SELECT id, user_id FROM ocr_jobs
+                WHERE status IN ('queued', 'running') AND cancel_requested = 0
+                ORDER BY created_at
+                """
+            ).fetchall()
+            connection.execute(
+                """
+                UPDATE ocr_job_pages
+                SET status = 'queued', started_at = NULL, finished_at = NULL,
+                    error = CASE WHEN status = 'running' THEN 'Resumed after application restart' ELSE error END
+                WHERE status = 'running'
+                  AND job_id IN (
+                      SELECT id FROM ocr_jobs
+                      WHERE status IN ('queued', 'running') AND cancel_requested = 0
+                  )
+                """
+            )
+            connection.execute(
+                """
+                UPDATE ocr_jobs
+                SET status = 'queued', started_at = NULL, finished_at = NULL, error = NULL
+                WHERE status IN ('queued', 'running') AND cancel_requested = 0
+                """
+            )
+        return [dict(row) for row in resumable]
 
     def claim_ocr_page(self, document_id: str, page_number: int, owner_token: str) -> bool:
         try:
@@ -659,6 +864,37 @@ class Database:
                 (user_id, document_id),
             ).fetchone()
         return self.get_ocr_job(user_id, str(row["id"])) if row else None
+
+    def get_latest_ocr_job(self, user_id: int, document_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id FROM ocr_jobs
+                WHERE user_id = ? AND document_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (user_id, document_id),
+            ).fetchone()
+        return self.get_ocr_job(user_id, str(row["id"])) if row else None
+
+    def retry_failed_ocr_job(self, user_id: int, job_id: str) -> str:
+        job = self.get_ocr_job(user_id, job_id)
+        if job["status"] in {"queued", "running", "cancelling"}:
+            return job_id
+        failed_pages = [
+            int(page["page_number"])
+            for page in job["pages"]
+            if page["status"] in {"failed", "cancelled"}
+        ]
+        if not failed_pages:
+            raise ValueError("This OCR job has no failed pages to retry")
+        return self.create_ocr_job(
+            user_id,
+            str(job["session_id"]),
+            str(job["document_id"]),
+            force=True,
+            page_numbers=failed_pages,
+        )
 
     def mark_ocr_job_running(self, job_id: str) -> None:
         with self.transaction() as connection:
@@ -849,7 +1085,10 @@ class Database:
                 files = []
                 for document_row in document_rows:
                     completed = connection.execute(
-                        "SELECT page_number FROM document_pages WHERE document_id = ? ORDER BY page_number",
+                        """
+                        SELECT page_number, review_status FROM document_pages
+                        WHERE document_id = ? ORDER BY page_number
+                        """,
                         (document_row["id"],),
                     ).fetchall()
                     files.append({
@@ -859,6 +1098,14 @@ class Database:
                         "num_pages": document_row["num_pages"],
                         "current_page": document_row["current_page"],
                         "completed_pages": [row["page_number"] for row in completed],
+                        "approved_pages": [
+                            row["page_number"] for row in completed
+                            if row["review_status"] == "approved"
+                        ],
+                        "needs_review_pages": [
+                            row["page_number"] for row in completed
+                            if row["review_status"] == "needs_review"
+                        ],
                     })
                 sessions.append({
                     "id": session["id"],
@@ -879,7 +1126,11 @@ class Database:
                     if document:
                         page = document["current_page"]
                         page_row = connection.execute(
-                            "SELECT markdown FROM document_pages WHERE document_id = ? AND page_number = ?",
+                            """
+                            SELECT markdown, confidence_score, review_status, reviewed_at
+                            FROM document_pages
+                            WHERE document_id = ? AND page_number = ?
+                            """,
                             (document["id"], page),
                         ).fetchone()
                         active_document = {
@@ -890,6 +1141,9 @@ class Database:
                             "current_page": page,
                             "markdown": page_row["markdown"] if page_row else "",
                             "has_ocr": page_row is not None,
+                            "confidence_score": page_row["confidence_score"] if page_row else None,
+                            "review_status": page_row["review_status"] if page_row else None,
+                            "reviewed_at": page_row["reviewed_at"] if page_row else None,
                         }
 
         payload = {
@@ -907,6 +1161,11 @@ class Database:
         }
         payload["active_ocr_job"] = (
             self.get_active_ocr_job(user_id, active_document["id"])
+            if active_document
+            else None
+        )
+        payload["recent_ocr_job"] = (
+            self.get_latest_ocr_job(user_id, active_document["id"])
             if active_document
             else None
         )
