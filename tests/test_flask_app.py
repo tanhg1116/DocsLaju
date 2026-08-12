@@ -7,8 +7,15 @@ from pathlib import Path
 
 import PyPDF2
 
-from app import _prepare_ocr_markdown, app
-from src.mistral_client import MODEL_DEFAULT, OcrImageResult, OcrMarkdown, OcrPageResult
+from app import _normalize_template_data, _prepare_ocr_markdown, app
+from src.extraction_templates import get_template
+from src.mistral_client import (
+    MODEL_DEFAULT,
+    OcrDocumentResult,
+    OcrImageResult,
+    OcrMarkdown,
+    OcrPageResult,
+)
 from src.services.database import ADMIN_USER_ID, Database
 
 
@@ -17,6 +24,7 @@ def test_schema_contains_the_persistent_repository(isolated_database: Path):
         "users", "projects", "sessions", "documents", "document_pages", "user_preferences",
         "document_assets", "ocr_jobs", "ocr_job_pages", "ocr_page_claims",
         "document_pages_fts",
+        "document_extractions", "document_extraction_claims",
     }
     with sqlite3.connect(isolated_database) as connection:
         tables = {
@@ -38,6 +46,50 @@ def test_schema_contains_the_persistent_repository(isolated_database: Path):
             row[1] for row in connection.execute("PRAGMA table_info(documents)")
         }
         assert "checksum" in document_columns
+        extraction_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(document_extractions)")
+        }
+        assert "schema_version" in extraction_columns
+
+
+def test_extraction_template_catalog_is_versioned_and_layout_driven():
+    with app.test_client() as client:
+        response = client.get("/api/extraction-templates")
+
+    assert response.status_code == 200
+    templates = {item["id"]: item for item in response.get_json()["templates"]}
+    assert set(templates) == {"invoice", "receipt", "resume"}
+    assert templates["invoice"]["schema_version"] == 1
+    assert templates["receipt"]["schema_version"] == 1
+    assert templates["resume"]["schema_version"] == 2
+    assert templates["invoice"]["layout"]["tables"][0]["key"] == "line_items"
+    assert templates["receipt"]["layout"]["tables"][0]["key"] == "purchased_items"
+    assert {table["key"] for table in templates["resume"]["layout"]["tables"]} >= {
+        "experience", "education", "projects", "certifications", "achievements"
+    }
+
+
+def test_resume_v2_has_contact_achievements_and_deduplicates_string_lists():
+    template = get_template("resume")
+    normalized = _normalize_template_data(
+        {
+            "document_type": "resume",
+            "linkedin_url": "https://www.linkedin.com/in/example",
+            "skills": ["Python", "python", "", "SQL"],
+            "achievements": [{
+                "title": "Competition winner",
+                "date": "2026",
+                "description": None,
+            }],
+            "review_notes": ["Unreadable date", "unreadable date"],
+        },
+        template,
+    )
+
+    assert normalized["linkedin_url"] == "https://www.linkedin.com/in/example"
+    assert normalized["skills"] == ["Python", "SQL"]
+    assert normalized["achievements"][0]["title"] == "Competition winner"
+    assert normalized["review_notes"] == ["Unreadable date"]
 
 
 def test_search_opens_the_matching_page_and_review_status_resets_after_edit(isolated_database: Path):
@@ -97,6 +149,130 @@ def test_duplicate_upload_is_reused_within_a_session(isolated_database: Path):
         payload = second.get_json()
         assert payload["upload"]["duplicate"] is True
         assert len(payload["sessions"][0]["files"]) == 1
+
+
+def test_receipt_extraction_is_separate_reviewable_and_exportable(monkeypatch, isolated_database: Path):
+    extracted = {
+        "document_type": "receipt",
+        "merchant_name": "Kedai Laju",
+        "merchant_registration_number": None,
+        "merchant_address": None,
+        "receipt_number": "R-1042",
+        "transaction_datetime": "2026-08-12",
+        "currency": "MYR",
+        "subtotal": 10.0,
+        "discount_amount": 0,
+        "tax_amount": 0.6,
+        "total_amount": 10.6,
+        "payment_method": "cash",
+        "purchased_items": [{
+            "description": "Kopi",
+            "quantity": 2,
+            "unit_price": 5,
+            "amount": 10,
+        }],
+        "review_notes": [],
+    }
+    monkeypatch.setattr("app.extract_document_annotation", lambda *_args, **_kwargs: extracted)
+
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        document_id = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(b"receipt-image"), "receipt.png")},
+            content_type="multipart/form-data",
+        ).get_json()["active_document"]["id"]
+        client.patch(
+            f"/api/sessions/{session_id}/files/{document_id}/markdown/1",
+            json={"markdown": "# Original OCR remains unchanged"},
+        )
+
+        endpoint = (
+            f"/api/sessions/{session_id}/files/{document_id}/"
+            "extractions/receipt"
+        )
+        initial = client.get(endpoint)
+        assert initial.status_code == 200
+        assert initial.get_json()["extraction"] is None
+
+        result = client.post(endpoint + "/run")
+        assert result.status_code == 200
+        extraction = result.get_json()["extraction"]
+        assert extraction["status"] == "needs_review"
+        assert extraction["data"]["merchant_name"] == "Kedai Laju"
+        assert app.extensions["database"].get_page_markdown(document_id, 1) == "# Original OCR remains unchanged"
+
+        edited = dict(extraction["data"])
+        edited["total_amount"] = 11.2
+        approved = client.patch(endpoint, json={"data": edited, "status": "approved"})
+        assert approved.status_code == 200
+        assert approved.get_json()["extraction"]["status"] == "approved"
+        assert approved.get_json()["extraction"]["data"]["total_amount"] == 11.2
+
+        exported = client.get(endpoint + ".csv")
+        assert exported.status_code == 200
+        assert exported.content_type.startswith("text/csv")
+        assert b"Kedai Laju" in exported.data
+        assert b"Kopi" in exported.data
+
+
+def test_receipt_template_combines_initial_ocr_and_extraction_in_one_request(
+    monkeypatch,
+    isolated_database: Path,
+):
+    extracted = {
+        "document_type": "receipt",
+        "merchant_name": "Kedai Laju",
+        "merchant_registration_number": None,
+        "merchant_address": None,
+        "receipt_number": "R-1042",
+        "transaction_datetime": "2026-08-12",
+        "currency": "MYR",
+        "subtotal": 10.0,
+        "discount_amount": 0,
+        "tax_amount": 0.6,
+        "total_amount": 10.6,
+        "payment_method": "cash",
+        "purchased_items": [],
+        "review_notes": [],
+    }
+    combined_calls = []
+
+    def combined(*_args, **_kwargs):
+        combined_calls.append(True)
+        return OcrDocumentResult(
+            pages=(OcrPageResult("# OCR and extraction from one response"),),
+            document_annotation=extracted,
+        )
+
+    monkeypatch.setattr("app.ocr_document_with_annotation", combined)
+    monkeypatch.setattr(
+        "app.extract_document_annotation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("annotation-only fallback must not run")
+        ),
+    )
+
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        document_id = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(b"receipt-image"), "receipt.png")},
+            content_type="multipart/form-data",
+        ).get_json()["active_document"]["id"]
+        endpoint = (
+            f"/api/sessions/{session_id}/files/{document_id}/"
+            "extractions/receipt/run"
+        )
+
+        response = client.post(endpoint)
+
+        assert response.status_code == 200
+        assert response.get_json()["ocr_included"] is True
+        assert len(combined_calls) == 1
+        assert app.extensions["database"].get_page_markdown(document_id, 1) == (
+            "# OCR and extraction from one response"
+        )
 
 
 def test_initial_state_has_one_session():
@@ -191,6 +367,10 @@ def test_sidebar_exposes_projects_and_complete_session_menu():
             b'id="needsReviewButton"',
             b'id="approvePageButton"',
             b'id="retryBatchButton"',
+            b'id="extractButton"',
+            b'id="extractionDialog"',
+            b'id="extractionDynamicFields"',
+            b'id="editExtractionButton"',
             b'value="markdown"',
             b'value="pdf"',
             b'value="bundle"',
@@ -227,6 +407,10 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         assert b'ui.importDialog.addEventListener("paste"' in script.data
         assert b'document.addEventListener("paste"' in script.data
         assert b"function pastedImageFiles" in script.data
+        assert b"function setExtractionEditMode" in script.data
+        assert b"control.readOnly = !extractionEditMode" in script.data
+        assert b'editExtractionButton.addEventListener("click"' in script.data
+        assert b".extraction-edit-only" in css.data
         assert b"Ctrl+V" in page.data
         assert b"function formatNumberedEquations" in script.data
         assert b"formatNumberedEquations(ui.renderedContent)" in script.data

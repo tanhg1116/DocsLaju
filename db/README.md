@@ -25,6 +25,8 @@ users
 │       ├── document_pages
 │       │   └── document_pages_fts (search index)
 │       ├── document_assets
+│       ├── document_extractions
+│       ├── document_extraction_claims
 │       ├── ocr_jobs
 │       │   └── ocr_job_pages
 │       └── ocr_page_claims
@@ -44,6 +46,11 @@ users
 - Extracted document objects are stored as BLOBs in `document_assets`. Each row
   belongs to a session, document, and page; Markdown uses portable
   `assets/{filename}` references instead of embedded data URLs.
+- Template-driven structured results are stored as JSON in
+  `document_extractions`, independently from raw OCR Markdown. The template id,
+  schema version, review status, and model are retained with each result.
+- `document_extraction_claims` prevents duplicate simultaneous structured API
+  requests for the same document and profile.
 - `document_pages.source_markdown` preserves the OCR response while `markdown`
   holds the editable version with short asset references.
 - Batch progress is stored in `ocr_jobs` and `ocr_job_pages`. A page whose HTTP

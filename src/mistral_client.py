@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 from dataclasses import dataclass
 from functools import lru_cache
@@ -36,6 +37,12 @@ class OcrPageResult:
     markdown: str
     images: tuple[OcrImageResult, ...] = ()
     confidence_score: float | None = None
+
+
+@dataclass(frozen=True)
+class OcrDocumentResult:
+    pages: tuple[OcrPageResult, ...]
+    document_annotation: dict
 
 
 class OcrMarkdown(str):
@@ -308,3 +315,138 @@ def ocr_image_markdown(image_bytes: bytes, *, model: str | None = None) -> str:
         page.markdown,
         parse_structured_md=True,
     )
+
+
+def _annotation_response_format(schema_name: str, schema: dict) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name,
+            "schema": schema,
+            "strict": True,
+        },
+    }
+
+
+def _parse_document_annotation(response: Any) -> dict:
+    raw = getattr(response, "document_annotation", None)
+    if isinstance(raw, dict):
+        result = raw
+    elif isinstance(raw, str) and raw.strip():
+        result = json.loads(raw)
+    else:
+        raise RuntimeError("Mistral returned no structured extraction")
+    if not isinstance(result, dict):
+        raise RuntimeError("Mistral returned an invalid structured extraction")
+    return result
+
+
+def _ocr_pages_from_response(response: Any) -> tuple[OcrPageResult, ...]:
+    pages: list[OcrPageResult] = []
+    for page in getattr(response, "pages", None) or []:
+        images = tuple(
+            OcrImageResult(str(image.id), str(image.image_base64))
+            for image in (getattr(page, "images", None) or [])
+            if getattr(image, "id", None) and getattr(image, "image_base64", None)
+        )
+        pages.append(
+            OcrPageResult(
+                str(getattr(page, "markdown", "")),
+                images,
+                _page_confidence(page),
+            )
+        )
+    return tuple(pages)
+
+
+def ocr_document_with_annotation(
+    content: bytes,
+    *,
+    is_pdf: bool,
+    mime_type: str,
+    schema_name: str,
+    schema: dict,
+    prompt: str,
+    model: str | None = None,
+) -> OcrDocumentResult:
+    """Return OCR pages and a strict document annotation from one API call."""
+    client = get_client()
+    if is_pdf:
+        uploaded_file = client.files.upload(
+            file={"file_name": "document.pdf", "content": content},
+            purpose="ocr",
+        )
+        signed_url = client.files.get_signed_url(file_id=uploaded_file.id, expiry=1)
+        document = {"type": "document_url", "document_url": signed_url.url}
+    else:
+        safe_mime = mime_type if mime_type.startswith("image/") else "image/jpeg"
+        encoded = base64.b64encode(content).decode()
+        document = {
+            "type": "image_url",
+            "image_url": f"data:{safe_mime};base64,{encoded}",
+        }
+
+    selected_model = model or MODEL_DEFAULT
+    log_api(
+        "ocr.process:start",
+        extra={"model": selected_model, "type": "ocr_with_annotation", "schema": schema_name},
+    )
+    response = client.ocr.process(
+        document=document,
+        model=selected_model,
+        include_image_base64=True,
+        confidence_scores_granularity="page",
+        document_annotation_format=_annotation_response_format(schema_name, schema),
+        document_annotation_prompt=prompt,
+    )
+    pages = _ocr_pages_from_response(response)
+    annotation = _parse_document_annotation(response)
+    log_api(
+        "ocr.process:ok",
+        extra={"type": "ocr_with_annotation", "schema": schema_name, "pages": len(pages)},
+    )
+    return OcrDocumentResult(pages, annotation)
+
+
+def extract_document_annotation(
+    content: bytes,
+    *,
+    is_pdf: bool,
+    mime_type: str,
+    schema_name: str,
+    schema: dict,
+    prompt: str,
+    model: str | None = None,
+) -> dict:
+    """Extract a strict structured annotation without altering OCR Markdown."""
+    client = get_client()
+    if is_pdf:
+        uploaded_file = client.files.upload(
+            file={"file_name": "document.pdf", "content": content},
+            purpose="ocr",
+        )
+        signed_url = client.files.get_signed_url(file_id=uploaded_file.id, expiry=1)
+        document = {"type": "document_url", "document_url": signed_url.url}
+    else:
+        safe_mime = mime_type if mime_type.startswith("image/") else "image/jpeg"
+        encoded = base64.b64encode(content).decode()
+        document = {
+            "type": "image_url",
+            "image_url": f"data:{safe_mime};base64,{encoded}",
+        }
+
+    selected_model = model or MODEL_DEFAULT
+    log_api(
+        "ocr.process:start",
+        extra={"model": selected_model, "type": "document_annotation", "schema": schema_name},
+    )
+    response = client.ocr.process(
+        document=document,
+        model=selected_model,
+        include_image_base64=False,
+        document_annotation_format=_annotation_response_format(schema_name, schema),
+        document_annotation_prompt=prompt,
+    )
+    result = _parse_document_annotation(response)
+    log_api("ocr.process:ok", extra={"type": "document_annotation", "schema": schema_name})
+    return result

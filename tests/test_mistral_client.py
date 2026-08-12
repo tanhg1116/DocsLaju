@@ -4,13 +4,17 @@ from src import mistral_client
 
 
 class FakeOcr:
-    def __init__(self, pages):
+    def __init__(self, pages, document_annotation=None):
         self.pages = pages
+        self.document_annotation = document_annotation
         self.calls = []
 
     def process(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(pages=self.pages)
+        return SimpleNamespace(
+            pages=self.pages,
+            document_annotation=self.document_annotation,
+        )
 
 
 class FakeFiles:
@@ -85,3 +89,62 @@ def test_structured_markdown_keeps_table_and_display_math_lines_intact():
     result = mistral_client._fix_markdown_line_breaks(source, parse_structured_md=True)
 
     assert result == source
+
+
+def test_document_annotation_uses_strict_schema_without_changing_markdown(monkeypatch):
+    annotation = '{"supplier_name":"Kedai Laju","total_amount":12.5}'
+    fake = SimpleNamespace(files=FakeFiles(), ocr=FakeOcr([], annotation))
+    monkeypatch.setattr(mistral_client, "get_client", lambda: fake)
+    schema = {
+        "type": "object",
+        "properties": {"supplier_name": {"type": "string"}},
+        "required": ["supplier_name"],
+    }
+
+    result = mistral_client.extract_document_annotation(
+        b"pdf",
+        is_pdf=True,
+        mime_type="application/pdf",
+        schema_name="invoice_receipt",
+        schema=schema,
+        prompt="Extract printed fields only",
+    )
+
+    assert result == {"supplier_name": "Kedai Laju", "total_amount": 12.5}
+    call = fake.ocr.calls[0]
+    assert call["model"] == "mistral-ocr-latest"
+    assert call["document_annotation_format"]["type"] == "json_schema"
+    assert call["document_annotation_format"]["json_schema"]["strict"] is True
+    assert call["document_annotation_prompt"] == "Extract printed fields only"
+
+
+def test_combined_ocr_returns_markdown_and_annotation_from_one_request(monkeypatch):
+    page = SimpleNamespace(
+        markdown="# Receipt",
+        images=[],
+        confidence_scores=SimpleNamespace(average_page_confidence_score=0.97),
+    )
+    annotation = '{"supplier_name":"Kedai Laju","total_amount":12.5}'
+    fake = SimpleNamespace(files=FakeFiles(), ocr=FakeOcr([page], annotation))
+    monkeypatch.setattr(mistral_client, "get_client", lambda: fake)
+
+    result = mistral_client.ocr_document_with_annotation(
+        b"pdf",
+        is_pdf=True,
+        mime_type="application/pdf",
+        schema_name="invoice_receipt",
+        schema={
+            "type": "object",
+            "properties": {"supplier_name": {"type": "string"}},
+            "required": ["supplier_name"],
+        },
+        prompt="Extract printed fields only",
+    )
+
+    assert len(fake.ocr.calls) == 1
+    assert result.pages[0].markdown == "# Receipt"
+    assert result.pages[0].confidence_score == 0.97
+    assert result.document_annotation["supplier_name"] == "Kedai Laju"
+    call = fake.ocr.calls[0]
+    assert call["include_image_base64"] is True
+    assert call["document_annotation_format"]["type"] == "json_schema"

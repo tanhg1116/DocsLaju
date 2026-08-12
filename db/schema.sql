@@ -110,6 +110,29 @@ CREATE TABLE IF NOT EXISTS document_assets (
     UNIQUE (document_id, filename)
 );
 
+CREATE TABLE IF NOT EXISTS document_extractions (
+    document_id TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'needs_review'
+        CHECK (status IN ('needs_review', 'approved')),
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TEXT,
+    PRIMARY KEY (document_id, profile),
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS document_extraction_claims (
+    document_id TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (document_id, profile),
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS ocr_jobs (
     id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,

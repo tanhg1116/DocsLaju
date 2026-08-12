@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import secrets
 import sqlite3
@@ -73,6 +74,14 @@ class Database:
                 )
             if "reviewed_at" not in page_columns:
                 connection.execute("ALTER TABLE document_pages ADD COLUMN reviewed_at TEXT")
+            extraction_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(document_extractions)").fetchall()
+            }
+            if "schema_version" not in extraction_columns:
+                connection.execute(
+                    "ALTER TABLE document_extractions ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+                )
             for row in connection.execute(
                 "SELECT id, content FROM documents WHERE checksum IS NULL"
             ).fetchall():
@@ -93,6 +102,7 @@ class Database:
                 SELECT document_id, page_number, markdown FROM document_pages
                 """
             )
+            connection.execute("DELETE FROM document_extraction_claims")
             self._migrate_embedded_assets(connection)
         self.ensure_active_session(ADMIN_USER_ID)
 
@@ -498,6 +508,14 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
+    def count_document_ocr_pages(self, document_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM document_pages WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+        return int(row["count"])
+
     def save_page_markdown(self, document_id: str, page_number: int, markdown: str) -> None:
         editable_markdown = str(markdown)
         source_markdown = getattr(markdown, "source_markdown", None)
@@ -703,6 +721,85 @@ class Database:
                 (session_id, document_id),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_document_extraction(
+        self,
+        user_id: int,
+        session_id: str,
+        document_id: str,
+        profile: str,
+    ) -> dict | None:
+        self.get_document(user_id, session_id, document_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM document_extractions
+                WHERE document_id = ? AND profile = ?
+                """,
+                (document_id, profile),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["data"] = json.loads(result.pop("data_json"))
+        return result
+
+    def save_document_extraction(
+        self,
+        user_id: int,
+        session_id: str,
+        document_id: str,
+        profile: str,
+        data: dict,
+        model: str,
+        *,
+        schema_version: int = 1,
+        status: str = "needs_review",
+    ) -> dict:
+        self.get_document(user_id, session_id, document_id)
+        if status not in {"needs_review", "approved"}:
+            raise ValueError("Unknown extraction review status")
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO document_extractions
+                    (document_id, profile, data_json, schema_version, status, model, reviewed_at)
+                VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? = 'approved' THEN CURRENT_TIMESTAMP ELSE NULL END)
+                ON CONFLICT(document_id, profile) DO UPDATE SET
+                    data_json = excluded.data_json,
+                    schema_version = excluded.schema_version,
+                    status = excluded.status,
+                    model = excluded.model,
+                    reviewed_at = CASE
+                        WHEN excluded.status = 'approved' THEN CURRENT_TIMESTAMP
+                        ELSE NULL
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (document_id, profile, payload, schema_version, status, model, status),
+            )
+        return self.get_document_extraction(
+            user_id, session_id, document_id, profile
+        ) or {}
+
+    def claim_document_extraction(self, document_id: str, profile: str) -> bool:
+        try:
+            with self.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO document_extraction_claims (document_id, profile) VALUES (?, ?)",
+                    (document_id, profile),
+                )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def release_document_extraction(self, document_id: str, profile: str) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                "DELETE FROM document_extraction_claims WHERE document_id = ? AND profile = ?",
+                (document_id, profile),
+            )
 
     def recover_interrupted_ocr_jobs(self) -> list[dict]:
         """Reset unfinished work to a resumable queue after a process restart."""

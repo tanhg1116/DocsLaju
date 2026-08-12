@@ -44,6 +44,7 @@
     <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
     <symbol id="icon-flag" viewBox="0 0 24 24"><path d="M5 22V4M5 4c5-4 9 4 14 0v10c-5 4-9-4-14 0"/></symbol>
     <symbol id="icon-circle-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
+    <symbol id="icon-list-checks" viewBox="0 0 24 24"><path d="m3 7 2 2 4-4M3 17l2 2 4-4M13 6h8M13 12h8M13 18h8"/></symbol>
   </svg>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
@@ -135,6 +136,7 @@
               </div>
             </div>
             <button class="header-upload-button icon-tooltip" id="uploadButton" aria-label="Upload documents" data-tooltip="Upload documents"><svg class="ui-icon"><use href="#icon-plus"></use></svg></button>
+            <button class="header-extract-button icon-tooltip" id="extractButton" aria-label="Extract structured data" data-tooltip="Extract structured document data" disabled><svg class="ui-icon"><use href="#icon-list-checks"></use></svg></button>
             <button class="header-export-button icon-tooltip" id="exportButton" aria-label="Export document" data-tooltip="Export document" disabled><svg class="ui-icon"><use href="#icon-download"></use></svg></button>
           </div>
           <span class="file-status" id="fileStatus">No document selected</span>
@@ -354,6 +356,50 @@
       <div class="modal-actions">
         <button class="button button-quiet" id="exportCancel" type="button">Cancel</button>
         <button class="button button-primary" id="exportSubmit" type="submit">Download</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="extraction-dialog" id="extractionDialog" aria-labelledby="extractionDialogTitle">
+    <form id="extractionForm" method="dialog" novalidate>
+      <div class="modal-header">
+        <span class="modal-icon green" aria-hidden="true"><svg class="ui-icon"><use href="#icon-list-checks"></use></svg></span>
+        <div>
+          <h2 id="extractionDialogTitle">Structured data extraction</h2>
+          <p id="extractionDocumentLabel">Extract reviewable business fields without changing raw Markdown.</p>
+        </div>
+      </div>
+
+      <label class="extraction-profile-field">
+        <span>Template</span>
+        <select id="extractionProfile">
+          <option value="">Choose a document type…</option>
+        </select>
+      </label>
+
+      <div class="extraction-empty" id="extractionEmpty">
+        <svg class="ui-icon" aria-hidden="true"><use href="#icon-list-checks"></use></svg>
+        <strong>No structured data yet</strong>
+        <p id="extractionEmptyMessage">Run the pilot to extract supplier, document number, date, totals, tax and line items.</p>
+        <button class="button button-primary" id="runExtractionButton" type="button">Extract structured data</button>
+      </div>
+
+      <div class="extraction-editor" id="extractionEditor" hidden>
+        <div class="extraction-status-line">
+          <span class="badge needs-review" id="extractionStatus">Needs review</span>
+          <small id="extractionModel"></small>
+        </div>
+        <div id="extractionDynamicFields"></div>
+      </div>
+
+      <p class="modal-status" id="extractionMessage" role="status"></p>
+      <div class="modal-actions extraction-actions">
+        <button class="button button-quiet" id="extractionClose" type="button">Close</button>
+        <button class="button button-quiet" id="extractionCsv" type="button" hidden>Download CSV</button>
+        <button class="button button-quiet" id="rerunExtractionButton" type="button" hidden>Run again</button>
+        <button class="button button-quiet" id="editExtractionButton" type="button" hidden>Edit</button>
+        <button class="button button-quiet" id="saveExtractionButton" type="button" hidden>Save</button>
+        <button class="button button-primary" id="approveExtractionButton" type="button" hidden>Approve</button>
       </div>
     </form>
   </dialog>

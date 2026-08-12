@@ -70,6 +70,25 @@ const ui = {
   batchError: document.querySelector("#batchError"),
   retryBatchButton: document.querySelector("#retryBatchButton"),
   exportButton: document.querySelector("#exportButton"),
+  extractButton: document.querySelector("#extractButton"),
+  extractionDialog: document.querySelector("#extractionDialog"),
+  extractionForm: document.querySelector("#extractionForm"),
+  extractionProfile: document.querySelector("#extractionProfile"),
+  extractionDocumentLabel: document.querySelector("#extractionDocumentLabel"),
+  extractionEmpty: document.querySelector("#extractionEmpty"),
+  extractionEmptyMessage: document.querySelector("#extractionEmptyMessage"),
+  extractionEditor: document.querySelector("#extractionEditor"),
+  extractionStatus: document.querySelector("#extractionStatus"),
+  extractionModel: document.querySelector("#extractionModel"),
+  extractionMessage: document.querySelector("#extractionMessage"),
+  runExtractionButton: document.querySelector("#runExtractionButton"),
+  rerunExtractionButton: document.querySelector("#rerunExtractionButton"),
+  editExtractionButton: document.querySelector("#editExtractionButton"),
+  saveExtractionButton: document.querySelector("#saveExtractionButton"),
+  approveExtractionButton: document.querySelector("#approveExtractionButton"),
+  extractionCsv: document.querySelector("#extractionCsv"),
+  extractionClose: document.querySelector("#extractionClose"),
+  extractionDynamicFields: document.querySelector("#extractionDynamicFields"),
   exportDialog: document.querySelector("#exportDialog"),
   exportForm: document.querySelector("#exportForm"),
   exportDocumentLabel: document.querySelector("#exportDocumentLabel"),
@@ -115,6 +134,10 @@ let pendingUploadFiles = [];
 let searchTimer = null;
 let searchGeneration = 0;
 let searchHighlight = null;
+let currentExtraction = null;
+let extractionTemplates = [];
+let currentExtractionLayout = null;
+let extractionEditMode = false;
 const expandedProjects = new Set();
 
 function iconMarkup(name, extraClass = "") {
@@ -1031,6 +1054,7 @@ function renderState({ refreshPreview = true } = {}) {
     ui.autoOcrToggle.checked = false;
     ui.autoOcrToggle.disabled = true;
     ui.autoOcrControl.classList.add("disabled");
+    ui.extractButton.disabled = true;
     ui.exportButton.disabled = true;
     ui.copyButton.disabled = true;
     ui.ocrBadge.textContent = "Waiting";
@@ -1058,6 +1082,7 @@ function renderState({ refreshPreview = true } = {}) {
   ui.markdownEditor.value = document.markdown;
   markdownDirty = false;
   ui.ocrButton.disabled = false;
+  ui.extractButton.disabled = false;
   setIconButton(ui.ocrButton, document.has_ocr ? "Re-OCR this page" : "Run OCR on this page", "scan-text");
   ui.exportButton.disabled = !document.has_ocr;
   ui.copyButton.disabled = !document.markdown;
@@ -1602,6 +1627,334 @@ async function downloadExport(format) {
   }
 }
 
+function selectedExtractionTemplate() {
+  return extractionTemplates.find((template) => template.id === ui.extractionProfile.value) || null;
+}
+
+function extractionEndpoint(suffix = "") {
+  return routeForDocument(`/extractions/${encodeURIComponent(ui.extractionProfile.value)}${suffix}`);
+}
+
+function extractionInput(definition, value, dataAttribute, dataValue) {
+  const input = definition.type === "long_text" ? document.createElement("textarea") : document.createElement("input");
+  if (input instanceof HTMLInputElement) {
+    input.type = definition.type === "number" ? "number" : "text";
+    if (input.type === "number") input.step = "any";
+  } else {
+    input.rows = 3;
+  }
+  input.dataset[dataAttribute] = dataValue;
+  input.value = value ?? "";
+  input.placeholder = "–";
+  return input;
+}
+
+function addExtractionTableRow(table, item = {}) {
+  const row = document.createElement("tr");
+  row.dataset.extractionTableRow = table.key;
+  for (const column of table.columns) {
+    const cell = document.createElement("td");
+    const input = extractionInput(column, item[column.key], "extractionColumn", column.key);
+    input.setAttribute("aria-label", column.label);
+    cell.append(input);
+    row.append(cell);
+  }
+  const action = document.createElement("td");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "remove-line-item extraction-edit-only";
+  remove.innerHTML = iconMarkup("trash");
+  remove.setAttribute("aria-label", "Remove line item");
+  remove.addEventListener("click", () => row.remove());
+  action.append(remove);
+  row.append(action);
+  ui.extractionDynamicFields.querySelector(`[data-extraction-table-body="${CSS.escape(table.key)}"]`)?.append(row);
+}
+
+function renderExtractionLayout(data) {
+  ui.extractionDynamicFields.replaceChildren();
+  if (!currentExtractionLayout) return;
+  for (const section of currentExtractionLayout.sections || []) {
+    const wrapper = document.createElement("section");
+    wrapper.className = "extraction-layout-section";
+    const heading = document.createElement("h3");
+    heading.textContent = section.title;
+    const fields = document.createElement("div");
+    fields.className = "extraction-fields";
+    for (const definition of section.fields || []) {
+      const label = document.createElement("label");
+      const caption = document.createElement("span");
+      caption.textContent = definition.label;
+      label.append(caption, extractionInput(definition, data[definition.key], "extractionField", definition.key));
+      fields.append(label);
+    }
+    wrapper.append(heading, fields);
+    ui.extractionDynamicFields.append(wrapper);
+  }
+  for (const table of currentExtractionLayout.tables || []) {
+    const wrapper = document.createElement("section");
+    wrapper.className = "extraction-layout-section";
+    const heading = document.createElement("div");
+    heading.className = "line-items-heading";
+    const title = document.createElement("strong");
+    title.textContent = table.title;
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "button button-quiet extraction-edit-only";
+    add.textContent = "Add row";
+    add.addEventListener("click", () => addExtractionTableRow(table));
+    heading.append(title, add);
+    const scroll = document.createElement("div");
+    scroll.className = "line-items-scroll";
+    const tableElement = document.createElement("table");
+    tableElement.className = "line-items-table";
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    for (const column of table.columns) {
+      const th = document.createElement("th");
+      th.textContent = column.label;
+      headRow.append(th);
+    }
+    headRow.append(document.createElement("th"));
+    head.append(headRow);
+    const body = document.createElement("tbody");
+    body.dataset.extractionTableBody = table.key;
+    tableElement.append(head, body);
+    scroll.append(tableElement);
+    wrapper.append(heading, scroll);
+    ui.extractionDynamicFields.append(wrapper);
+    for (const item of data[table.key] || []) addExtractionTableRow(table, item);
+  }
+  for (const list of currentExtractionLayout.lists || []) {
+    const label = document.createElement("label");
+    label.className = "extraction-notes";
+    const caption = document.createElement("span");
+    caption.textContent = list.label;
+    const textarea = document.createElement("textarea");
+    textarea.rows = 3;
+    textarea.placeholder = "–";
+    textarea.dataset.extractionList = list.key;
+    textarea.value = (data[list.key] || []).join("\n");
+    label.append(caption, textarea);
+    ui.extractionDynamicFields.append(label);
+  }
+}
+
+function setExtractionBusy(isBusy, message = "") {
+  ui.extractionDialog.classList.toggle("is-busy", isBusy);
+  ui.extractionMessage.textContent = message;
+  ui.extractionMessage.classList.remove("error", "warning");
+}
+
+function setExtractionEditMode(isEditing) {
+  extractionEditMode = Boolean(isEditing && currentExtraction);
+  ui.extractionDialog.classList.toggle("is-editing", extractionEditMode);
+  for (const control of ui.extractionDynamicFields.querySelectorAll("input, textarea")) {
+    control.readOnly = !extractionEditMode;
+  }
+  for (const control of ui.extractionDynamicFields.querySelectorAll("button")) {
+    control.disabled = !extractionEditMode;
+  }
+  ui.editExtractionButton.hidden = !currentExtraction || extractionEditMode;
+  ui.saveExtractionButton.hidden = !currentExtraction || !extractionEditMode;
+  ui.approveExtractionButton.disabled = extractionEditMode;
+  ui.rerunExtractionButton.disabled = extractionEditMode;
+  ui.extractionProfile.disabled = extractionEditMode;
+}
+
+function renderExtraction(extraction) {
+  currentExtraction = extraction;
+  const hasResult = Boolean(extraction?.data);
+  ui.extractionEmpty.hidden = hasResult;
+  ui.extractionEditor.hidden = !hasResult;
+  ui.rerunExtractionButton.hidden = !hasResult;
+  ui.approveExtractionButton.hidden = !hasResult;
+  ui.extractionCsv.hidden = !hasResult;
+  if (!hasResult) {
+    ui.extractionDynamicFields.replaceChildren();
+    setExtractionEditMode(false);
+    return;
+  }
+
+  const data = extraction.data;
+  renderExtractionLayout(data);
+  const approved = extraction.status === "approved";
+  ui.extractionStatus.textContent = approved ? "Approved" : "Needs review";
+  ui.extractionStatus.className = `badge ${approved ? "complete" : "needs-review"}`;
+  ui.extractionModel.textContent = extraction.model || "mistral-ocr-latest";
+  ui.approveExtractionButton.textContent = approved ? "Return to review" : "Approve";
+  setExtractionEditMode(false);
+}
+
+function numberOrNull(value) {
+  return value === "" ? null : Number(value);
+}
+
+function readExtractionForm() {
+  const data = { document_type: ui.extractionProfile.value };
+  for (const input of ui.extractionForm.querySelectorAll("[data-extraction-field]")) {
+    data[input.dataset.extractionField] = input.type === "number"
+      ? numberOrNull(input.value)
+      : (input.value.trim() || null);
+  }
+  for (const table of currentExtractionLayout?.tables || []) {
+    data[table.key] = [...ui.extractionForm.querySelectorAll(`[data-extraction-table-row="${CSS.escape(table.key)}"]`)].map((row) => {
+      const item = {};
+      for (const input of row.querySelectorAll("[data-extraction-column]")) {
+        item[input.dataset.extractionColumn] = input.type === "number" ? numberOrNull(input.value) : (input.value.trim() || null);
+      }
+      return item;
+    });
+  }
+  for (const input of ui.extractionForm.querySelectorAll("[data-extraction-list]")) {
+    data[input.dataset.extractionList] = input.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  }
+  return data;
+}
+
+async function loadExtractionForTemplate() {
+  const template = selectedExtractionTemplate();
+  const document = activeDocument();
+  if (!document) return;
+  if (!template) {
+    currentExtractionLayout = null;
+    currentExtraction = null;
+    renderExtraction(null);
+    ui.runExtractionButton.disabled = true;
+    ui.runExtractionButton.textContent = "Choose a document type";
+    ui.extractionEmptyMessage.textContent = "Choose Invoice, Receipt, or CV / Résumé to load its fields and tables.";
+    ui.extractionMessage.textContent = "";
+    ui.extractionMessage.classList.remove("error", "warning");
+    return;
+  }
+  currentExtractionLayout = template.layout;
+  currentExtraction = null;
+  setExtractionEditMode(false);
+  renderExtraction(null);
+  const documentSummary = activeSession()?.files.find((item) => item.id === document.id);
+  const hasAnyOcr = Boolean(documentSummary?.completed_pages?.length);
+  const exceedsPageLimit = document.num_pages > template.max_pages;
+  ui.runExtractionButton.textContent = hasAnyOcr ? `Extract as ${template.label}` : `OCR + extract as ${template.label}`;
+  ui.runExtractionButton.disabled = exceedsPageLimit;
+  ui.extractionEmptyMessage.textContent = exceedsPageLimit
+    ? `This template supports up to ${template.max_pages} pages. Split the document before extraction.`
+    : hasAnyOcr
+      ? "OCR already exists. Extraction uses one additional request and preserves the existing Markdown."
+      : `One Mistral request will return both OCR Markdown and ${template.label.toLowerCase()} fields.`;
+  ui.extractionMessage.textContent = "Loading saved extraction…";
+  ui.extractionMessage.classList.remove("error", "warning");
+  try {
+    const payload = await api(extractionEndpoint());
+    currentExtractionLayout = payload.layout;
+    renderExtraction(payload.extraction);
+    const outdated = payload.extraction && Number(payload.extraction.schema_version || 1) < Number(payload.schema_version || 1);
+    ui.extractionMessage.textContent = outdated
+      ? `This saved result uses ${template.label} template v${payload.extraction.schema_version || 1}. Run again to update it to v${payload.schema_version}.`
+      : payload.extraction ? "Review every field before approval." : "";
+    ui.extractionMessage.classList.toggle("warning", Boolean(outdated));
+  } catch (error) {
+    ui.extractionMessage.textContent = error.message;
+    ui.extractionMessage.classList.add("error");
+  }
+}
+
+async function openExtractionDialog() {
+  const document = activeDocument();
+  if (!document) return;
+  ui.extractionDocumentLabel.textContent = `${document.name} · extracted data is stored separately from OCR Markdown`;
+  if (typeof ui.extractionDialog.showModal === "function") ui.extractionDialog.showModal();
+  else ui.extractionDialog.setAttribute("open", "");
+  try {
+    if (!extractionTemplates.length) {
+      extractionTemplates = (await api("/api/extraction-templates")).templates;
+      const placeholder = window.document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Choose a document type…";
+      ui.extractionProfile.replaceChildren(placeholder, ...extractionTemplates.map((template) => {
+        const option = window.document.createElement("option");
+        option.value = template.id;
+        option.textContent = template.label;
+        return option;
+      }));
+    }
+    ui.extractionProfile.value = "";
+    await loadExtractionForTemplate();
+  } catch (error) {
+    ui.extractionMessage.textContent = error.message;
+    ui.extractionMessage.classList.add("error");
+  }
+}
+
+function closeExtractionDialog() {
+  setExtractionEditMode(false);
+  if (ui.extractionDialog.open) ui.extractionDialog.close();
+  else ui.extractionDialog.removeAttribute("open");
+}
+
+async function runStructuredExtraction(confirmRerun = false) {
+  const document = activeDocument();
+  const documentSummary = activeSession()?.files.find((item) => item.id === document?.id);
+  const hasAnyOcr = Boolean(documentSummary?.completed_pages?.length);
+  const template = selectedExtractionTemplate();
+  if (!template) return;
+  if (confirmRerun && !window.confirm(`Run ${template.label} extraction again? This replaces the saved structured fields.`)) return;
+  if (!confirmRerun && hasAnyOcr && !window.confirm("This document was already OCR'd without a structured template. Continue with one additional Mistral request? Existing Markdown will not be changed.")) return;
+  setExtractionBusy(true, hasAnyOcr
+    ? `Extracting ${template.label.toLowerCase()} fields while preserving existing Markdown…`
+    : `Running OCR and ${template.label.toLowerCase()} extraction in one request…`);
+  try {
+    const payload = await api(extractionEndpoint("/run"), { method: "POST" });
+    renderExtraction(payload.extraction);
+    if (payload.ocr_included) {
+      state = await api("/api/state");
+      renderState({ refreshPreview: false });
+    }
+    ui.extractionMessage.textContent = payload.ocr_included
+      ? "OCR and extraction completed in one request. Check every field before approval."
+      : "Extraction complete. Existing Markdown was preserved; check every field before approval.";
+  } catch (error) {
+    ui.extractionMessage.textContent = error.message;
+    ui.extractionMessage.classList.add("error");
+  } finally {
+    ui.extractionDialog.classList.remove("is-busy");
+  }
+}
+
+async function saveStructuredExtraction(status = "needs_review") {
+  if (!currentExtraction) return;
+  setExtractionBusy(true, status === "approved" ? "Approving extraction…" : "Saving extraction…");
+  try {
+    const payload = await api(extractionEndpoint(), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: readExtractionForm(), status }),
+    });
+    renderExtraction(payload.extraction);
+    ui.extractionMessage.textContent = status === "approved"
+      ? "Structured data approved."
+      : "Structured data saved for further review.";
+  } catch (error) {
+    ui.extractionMessage.textContent = error.message;
+    ui.extractionMessage.classList.add("error");
+  } finally {
+    ui.extractionDialog.classList.remove("is-busy");
+  }
+}
+
+async function downloadExtractionCsv() {
+  try {
+    const response = await fetch(extractionEndpoint(".csv"));
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.error || `CSV export failed (${response.status})`);
+    }
+    downloadResponseBlob(response, await response.blob());
+    toast("Invoice data CSV exported");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 function openSidebar() { ui.sidebar.classList.add("open"); ui.scrim.classList.add("open"); }
 function closeSidebar() { ui.sidebar.classList.remove("open"); ui.scrim.classList.remove("open"); }
 function setSidebarCollapsed(collapsed) {
@@ -1849,6 +2202,21 @@ ui.exportForm.addEventListener("submit", (event) => {
   event.preventDefault();
   downloadExport(ui.exportForm.elements.exportFormat.value);
 });
+ui.extractButton.addEventListener("click", openExtractionDialog);
+ui.extractionProfile.addEventListener("change", loadExtractionForTemplate);
+ui.extractionClose.addEventListener("click", closeExtractionDialog);
+ui.runExtractionButton.addEventListener("click", () => runStructuredExtraction(false));
+ui.rerunExtractionButton.addEventListener("click", () => runStructuredExtraction(true));
+ui.editExtractionButton.addEventListener("click", () => {
+  setExtractionEditMode(true);
+  ui.extractionMessage.textContent = "Edit the fields and tables, then save your changes.";
+  ui.extractionDynamicFields.querySelector("input, textarea")?.focus();
+});
+ui.saveExtractionButton.addEventListener("click", () => saveStructuredExtraction("needs_review"));
+ui.approveExtractionButton.addEventListener("click", () => {
+  saveStructuredExtraction(currentExtraction?.status === "approved" ? "needs_review" : "approved");
+});
+ui.extractionCsv.addEventListener("click", downloadExtractionCsv);
 ui.fitPageButton.addEventListener("click", () => setPreviewView("fit-page"));
 ui.fitWidthButton.addEventListener("click", () => setPreviewView("fit-width"));
 ui.zoomOutButton.addEventListener("click", () => changeZoom(-10));

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import csv
 import html
 import io
+import json
+import math
 import mimetypes
 import os
 import re
@@ -24,8 +27,15 @@ from src.mistral_client import (
     OcrMarkdown,
     OcrPageResult,
     _fix_markdown_line_breaks,
+    extract_document_annotation,
+    ocr_document_with_annotation,
     ocr_image_with_assets,
     ocr_pdf_pages_with_assets,
+)
+from src.extraction_templates import (
+    DOCUMENT_ANNOTATION_PAGE_LIMIT,
+    get_template,
+    public_templates,
 )
 from src.services.database import ADMIN_USER_ID, Database
 from src.services.browser_pdf import BrowserPdfError, render_url_to_pdf
@@ -42,8 +52,6 @@ MATH_EXPRESSION_RE = re.compile(
     re.DOTALL,
 )
 ASSET_REFERENCE_RE = re.compile(r"(!\[[^\]]*\]\()assets/([^\s)]+)(\))")
-
-
 load_dotenv(override=False)
 app = Flask(__name__)
 app.config.update(
@@ -246,6 +254,111 @@ def _resume_pending_ocr_jobs() -> None:
 
 
 _resume_pending_ocr_jobs()
+
+
+def _nullable_text(value: object, limit: int = 500) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:limit] if text else None
+
+
+def _nullable_number(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("Amounts must be numbers")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Amounts must be numbers") from exc
+    if not math.isfinite(number) or not (-1_000_000_000_000 < number < 1_000_000_000_000):
+        raise ValueError("Amount is outside the supported range")
+    return round(number, 6)
+
+
+def _normalize_template_data(data: object, template: dict) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("Structured extraction must be an object")
+    schema = template["schema"]
+
+    def normalize(value: object, field_schema: dict, depth: int = 0) -> object:
+        if depth > 4:
+            raise ValueError("Structured extraction is nested too deeply")
+        raw_type = field_schema.get("type")
+        allowed_types = raw_type if isinstance(raw_type, list) else [raw_type]
+        non_null_type = next((item for item in allowed_types if item != "null"), None)
+        if value is None:
+            return [] if non_null_type == "array" else None
+        if non_null_type == "string":
+            return _nullable_text(value, 4000)
+        if non_null_type == "number":
+            return _nullable_number(value)
+        if non_null_type == "boolean":
+            if isinstance(value, bool):
+                return value
+            raise ValueError("Boolean fields must be true or false")
+        if non_null_type == "array":
+            if not isinstance(value, list):
+                raise ValueError("Repeated fields must be lists")
+            item_schema = field_schema.get("items", {})
+            normalized_items = [
+                normalize(item, item_schema, depth + 1) for item in value[:500]
+            ]
+            item_type = item_schema.get("type")
+            if item_type == "string" or (
+                isinstance(item_type, list) and "string" in item_type
+            ):
+                unique_items: list[str] = []
+                seen: set[str] = set()
+                for item in normalized_items:
+                    if not isinstance(item, str) or not item:
+                        continue
+                    identity = item.casefold()
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    unique_items.append(item)
+                return unique_items
+            return normalized_items
+        if non_null_type == "object":
+            if not isinstance(value, dict):
+                raise ValueError("Structured sections must be objects")
+            properties = field_schema.get("properties", {})
+            return {
+                key: normalize(value.get(key), child_schema, depth + 1)
+                for key, child_schema in properties.items()
+            }
+        return None
+
+    normalized = {
+        key: normalize(data.get(key), field_schema)
+        for key, field_schema in schema["properties"].items()
+    }
+    normalized["document_type"] = template["id"]
+    return normalized
+
+
+def _template_from_request(template_id: str) -> dict:
+    try:
+        return get_template(template_id)
+    except KeyError as exc:
+        raise NotFound("Extraction template not found") from exc
+
+
+def _extraction_payload(extraction: dict | None, template: dict) -> dict:
+    return {
+        "profile": template["id"],
+        "profile_name": template["label"],
+        "schema_version": template["schema_version"],
+        "layout": template["layout"],
+        "extraction": extraction,
+    }
+
+
+@app.get("/api/extraction-templates")
+def extraction_templates() -> Response:
+    return jsonify({"templates": public_templates()})
 
 
 @app.get("/")
@@ -513,6 +626,158 @@ def document_asset(session_id: str, file_id: str, filename: str) -> Response:
     )
     response.headers["Cache-Control"] = "private, max-age=3600"
     return response
+
+
+@app.get("/api/sessions/<session_id>/files/<file_id>/extractions/<template_id>")
+def get_document_extraction(session_id: str, file_id: str, template_id: str) -> Response:
+    template = _template_from_request(template_id)
+    try:
+        extraction = _db().get_document_extraction(
+            ADMIN_USER_ID, session_id, file_id, template["id"]
+        )
+    except KeyError as exc:
+        raise NotFound("Document not found") from exc
+    return jsonify(_extraction_payload(extraction, template))
+
+
+@app.post("/api/sessions/<session_id>/files/<file_id>/extractions/<template_id>/run")
+def run_document_extraction(session_id: str, file_id: str, template_id: str) -> Response:
+    template = _template_from_request(template_id)
+    document = _document(session_id, file_id)
+    if int(document["num_pages"]) > DOCUMENT_ANNOTATION_PAGE_LIMIT:
+        raise BadRequest(
+            "Structured extraction currently supports documents up to 8 pages. "
+            "Split this document before using the structured template."
+        )
+    if not _db().claim_document_extraction(file_id, template["id"]):
+        raise Conflict("Structured extraction is already running for this document")
+    claimed_pages: list[int] = []
+    page_owner_token = f"structured-{secrets.token_hex(8)}"
+    ocr_included = False
+    try:
+        has_existing_ocr = _db().count_document_ocr_pages(file_id) > 0
+        if not has_existing_ocr:
+            if _db().get_active_ocr_job(ADMIN_USER_ID, file_id):
+                raise Conflict("Stop the active OCR job before starting structured extraction")
+            for page_number in range(1, int(document["num_pages"]) + 1):
+                if not _db().claim_ocr_page(file_id, page_number, page_owner_token):
+                    raise Conflict(f"Page {page_number} is already being processed")
+                claimed_pages.append(page_number)
+
+            combined = ocr_document_with_annotation(
+                document["content"],
+                is_pdf=bool(document["is_pdf"]),
+                mime_type=str(document["mime_type"]),
+                schema_name=f"{template['id']}_v{template['schema_version']}",
+                schema=template["schema"],
+                prompt=template["prompt"],
+                model=MODEL_DEFAULT,
+            )
+            if len(combined.pages) != int(document["num_pages"]):
+                raise RuntimeError(
+                    "Mistral returned an unexpected number of OCR pages; nothing was saved"
+                )
+            normalized = _normalize_template_data(combined.document_annotation, template)
+            try:
+                _db().get_document(ADMIN_USER_ID, session_id, file_id)
+            except KeyError as exc:
+                raise NotFound("Document was deleted while OCR was running") from exc
+            for page_number, page in enumerate(combined.pages, start=1):
+                prepared = _prepare_ocr_markdown(document, page_number, page)
+                _db().save_page_markdown(file_id, page_number, prepared)
+            ocr_included = True
+        else:
+            # Existing Markdown may contain user edits. Preserve it exactly and
+            # request only the annotation instead of replacing page content.
+            result = extract_document_annotation(
+                document["content"],
+                is_pdf=bool(document["is_pdf"]),
+                mime_type=str(document["mime_type"]),
+                schema_name=f"{template['id']}_v{template['schema_version']}",
+                schema=template["schema"],
+                prompt=template["prompt"],
+                model=MODEL_DEFAULT,
+            )
+            normalized = _normalize_template_data(result, template)
+        extraction = _db().save_document_extraction(
+            ADMIN_USER_ID,
+            session_id,
+            file_id,
+            template["id"],
+            normalized,
+            MODEL_DEFAULT,
+            schema_version=template["schema_version"],
+        )
+    finally:
+        for page_number in claimed_pages:
+            _db().release_ocr_page(file_id, page_number, page_owner_token)
+        _db().release_document_extraction(file_id, template["id"])
+    payload = _extraction_payload(extraction, template)
+    payload["ocr_included"] = ocr_included
+    return jsonify(payload)
+
+
+@app.patch("/api/sessions/<session_id>/files/<file_id>/extractions/<template_id>")
+def update_document_extraction(session_id: str, file_id: str, template_id: str) -> Response:
+    template = _template_from_request(template_id)
+    _document(session_id, file_id)
+    existing = _db().get_document_extraction(
+        ADMIN_USER_ID, session_id, file_id, template["id"]
+    )
+    if not existing:
+        raise NotFound("Run structured extraction before editing it")
+    payload = request.get_json(silent=True) or {}
+    try:
+        normalized = _normalize_template_data(payload.get("data"), template)
+        status = str(payload.get("status", "needs_review"))
+        extraction = _db().save_document_extraction(
+            ADMIN_USER_ID,
+            session_id,
+            file_id,
+            template["id"],
+            normalized,
+            str(existing["model"]),
+            schema_version=template["schema_version"],
+            status=status,
+        )
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from exc
+    return jsonify(_extraction_payload(extraction, template))
+
+
+@app.get("/api/sessions/<session_id>/files/<file_id>/extractions/<template_id>.csv")
+def export_document_extraction_csv(session_id: str, file_id: str, template_id: str) -> Response:
+    template = _template_from_request(template_id)
+    document = _document(session_id, file_id)
+    extraction = _db().get_document_extraction(
+        ADMIN_USER_ID, session_id, file_id, template["id"]
+    )
+    if not extraction:
+        raise NotFound("Run structured extraction before exporting it")
+    data = extraction["data"]
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["field", "value"])
+    for section in template["layout"].get("sections", []):
+        for field in section.get("fields", []):
+            writer.writerow([field["label"], data.get(field["key"])])
+    for list_definition in template["layout"].get("lists", []):
+        values = data.get(list_definition["key"]) or []
+        writer.writerow([list_definition["label"], " | ".join(str(value) for value in values)])
+    for table in template["layout"].get("tables", []):
+        writer.writerow([])
+        writer.writerow([table["title"]])
+        writer.writerow([column["label"] for column in table["columns"]])
+        for item in data.get(table["key"], []):
+            writer.writerow([item.get(column["key"]) for column in table["columns"]])
+    stem = secure_filename(Path(document["name"]).stem) or "document"
+    return Response(
+        "\ufeff" + output.getvalue(),
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{stem}-{template_id}-data.csv"'
+        },
+    )
 
 
 @app.post("/api/sessions/<session_id>/files/<file_id>/ocr/<int:page_number>")

@@ -22,6 +22,7 @@ This branch transitions the UI from Streamlit to a custom Flask frontend while p
 - Workspace-wide OCR text search with direct page navigation and result highlighting
 - Per-page review states for approval and follow-up, including OCR confidence indicators
 - Restart-resilient OCR jobs, failed-page retry, and duplicate-upload detection
+- Template-driven Invoice, Receipt, and CV/Résumé extraction with editable fields, tables, approval, and CSV export
 - SQLite persistence for sessions, uploads, and per-page OCR edits
 - Per-page OCR and editing with `mistral-ocr-latest`
 - Markdown ZIP, rendered PDF, and combined Markdown + PDF ZIP exports
@@ -131,6 +132,13 @@ The complete database repository tree and relationship diagram are in
 - Uploads are hashed with SHA-256; selecting the same file twice in one session
   reopens the stored document instead of duplicating it or paying for OCR again.
 - Deleting a document cascades to all of its extracted asset rows.
+- Structured extraction is opened from the green button in the document header.
+  Choose the versioned Invoice, Receipt, or CV/Résumé template. On a new document
+  (up to eight pages), one Mistral OCR request returns both page Markdown and
+  schema-validated structured data. The reusable UI renders fields and tables
+  from the trusted template layout; missing scalar values stay `null` in SQLite
+  and appear as `–`. If OCR Markdown already exists, a fallback extraction
+  request preserves it exactly. Re-running replaces only that template's data.
 - The existing OpenAI dependency is retained for future restoration of AI-generated filenames, but it is not used by this Flask draft.
 
 ## License
