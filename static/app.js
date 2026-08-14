@@ -1,5 +1,8 @@
 const ui = {
   workspaceGrid: document.querySelector("#workspaceGrid"),
+  previewPaneResizer: document.querySelector("#previewPaneResizer"),
+  rawPaneResizer: document.querySelector("#rawPaneResizer"),
+  workflowStatus: document.querySelector("#workflowStatus"),
   sessionList: document.querySelector("#sessionList"),
   projectList: document.querySelector("#projectList"),
   archivedSessionList: document.querySelector("#archivedSessionList"),
@@ -100,6 +103,7 @@ const ui = {
   exportCancel: document.querySelector("#exportCancel"),
   copyButton: document.querySelector("#copyButton"),
   saveState: document.querySelector("#saveState"),
+  themeToggle: document.querySelector("#themeToggle"),
   importDialog: document.querySelector("#importDialog"),
   importForm: document.querySelector("#importForm"),
   importFilePicker: document.querySelector("#importFilePicker"),
@@ -143,6 +147,7 @@ let extractionTemplates = [];
 let currentExtractionLayout = null;
 let extractionEditMode = false;
 let workspaceView = "markdown";
+let paneRatios = { preview: 0.34, raw: 0.33 };
 const expandedProjects = new Set();
 
 function iconMarkup(name, extraClass = "") {
@@ -364,6 +369,20 @@ function positionMenu(menu, anchor) {
 
 function sessionById(id) {
   return state.sessions.find((item) => item.id === id) || null;
+}
+
+function setTheme(theme, persist = true) {
+  const selected = theme === "dark" ? "dark" : "light";
+  const dark = selected === "dark";
+  document.documentElement.dataset.theme = selected;
+  ui.themeToggle.setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
+  ui.themeToggle.setAttribute("aria-pressed", String(dark));
+  ui.themeToggle.dataset.tooltip = dark ? "Switch to light theme" : "Switch to dark theme";
+  ui.themeToggle.querySelector("use").setAttribute("href", dark ? "#icon-sun" : "#icon-moon");
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#101216" : "#f4f6f9");
+  if (persist) {
+    try { localStorage.setItem("docslaju-theme", selected); } catch (_) { /* optional */ }
+  }
 }
 
 function searchTerms(value) {
@@ -706,6 +725,7 @@ function updateBatchControls(job) {
     ((job.failed_pages || 0) + (job.cancelled_pages || 0) > 0)
   );
   const automaticOn = Boolean(job && ["queued", "running"].includes(job.status));
+  updateWorkflowStatus(document, active ? "processing" : null);
   ui.autoOcrToggle.checked = automaticOn;
   ui.autoOcrToggle.disabled = !document || job?.status === "cancelling";
   ui.autoOcrControl.classList.toggle("disabled", ui.autoOcrToggle.disabled);
@@ -790,6 +810,23 @@ function updateReviewControls(document) {
   ui.ocrBadge.title = document.confidence_score == null
     ? ""
     : `OCR confidence ${Math.round(document.confidence_score * 100)}%`;
+}
+
+function updateWorkflowStatus(document, overrideStep = null) {
+  ui.workflowStatus.hidden = !document;
+  if (!document) return;
+  const activeStep = overrideStep || (!document.has_ocr
+    ? "uploaded"
+    : document.review_status === "approved"
+      ? "approved"
+      : "review");
+  const order = ["uploaded", "processing", "review", "approved"];
+  const activeIndex = order.indexOf(activeStep);
+  for (const step of ui.workflowStatus.querySelectorAll("[data-workflow-step]")) {
+    const index = order.indexOf(step.dataset.workflowStep);
+    step.classList.toggle("complete", index < activeIndex || (activeStep === "approved" && index === activeIndex));
+    step.classList.toggle("active", index === activeIndex);
+  }
 }
 
 function updateWords(value) {
@@ -1087,6 +1124,7 @@ function renderState({ refreshPreview = true } = {}) {
     ui.ocrBadge.className = "badge";
     ui.ocrBadge.removeAttribute("title");
     updateReviewControls(null);
+    updateWorkflowStatus(null);
     updateWords("");
     renderMarkdown("");
     setOcrLoading(false);
@@ -1124,6 +1162,7 @@ function renderState({ refreshPreview = true } = {}) {
   ui.ocrBadge.textContent = document.has_ocr ? "Complete" : "Ready";
   ui.ocrBadge.className = `badge${document.has_ocr ? " complete" : ""}`;
   updateReviewControls(document);
+  updateWorkflowStatus(document);
   updateWords(document.markdown);
   renderMarkdown(document.markdown);
   selectEditorSearchMatch();
@@ -1253,6 +1292,7 @@ async function runOcr() {
   ui.ocrBadge.textContent = "Processing";
   ui.ocrBadge.className = "badge processing";
   ui.fileStatus.textContent = "OCR running";
+  updateWorkflowStatus(document, "processing");
   setOcrLoading(true, document.current_page);
   setBusy(true, "OCR running…");
   try {
@@ -1270,6 +1310,7 @@ async function runOcr() {
   } catch (error) {
     ui.ocrBadge.textContent = "Error";
     ui.ocrBadge.className = "badge";
+    updateWorkflowStatus(activeDocument());
     toast(error.message, "error");
   } finally {
     const current = activeDocument();
@@ -1436,6 +1477,7 @@ function saveMarkdown(value) {
   ui.copyButton.disabled = !value;
   ui.exportButton.disabled = false;
   updateReviewControls(document);
+  updateWorkflowStatus(document);
   ui.saveState.textContent = "Unsaved";
   const saveUrl = routeForDocument(`/markdown/${document.current_page}`);
   saveTimer = setTimeout(async () => {
@@ -1473,6 +1515,7 @@ async function savePendingMarkdown() {
   document.review_status = "unreviewed";
   document.reviewed_at = null;
   updateReviewControls(document);
+  updateWorkflowStatus(document);
   ui.saveState.textContent = "Saved";
 }
 
@@ -1489,6 +1532,7 @@ async function setPageReviewStatus(status) {
     document.review_status = result.review_status;
     document.reviewed_at = result.reviewed_at;
     updateReviewControls(document);
+    updateWorkflowStatus(document);
     toast(status === "approved" ? `Page ${document.current_page} approved` : status === "needs_review" ? `Page ${document.current_page} flagged for review` : `Page ${document.current_page} returned to review`);
   } catch (error) {
     toast(error.message, "error");
@@ -1973,6 +2017,67 @@ function setWorkspaceView(view) {
   ui.extractButton.classList.toggle("active", structured);
   ui.markdownViewButton.setAttribute("aria-pressed", String(!structured));
   ui.extractButton.setAttribute("aria-pressed", String(structured));
+  applyPaneLayout();
+  try { localStorage.setItem("docslaju-workspace-view", workspaceView); } catch (_) { /* optional */ }
+}
+
+function applyPaneLayout() {
+  const previewPercent = Math.round(paneRatios.preview * 10000) / 100;
+  const rawPercent = Math.round(paneRatios.raw * 10000) / 100;
+  ui.workspaceGrid.style.setProperty("--preview-pane", `${previewPercent}%`);
+  ui.workspaceGrid.style.setProperty("--raw-pane", `${rawPercent}%`);
+  ui.previewPaneResizer.setAttribute("aria-valuenow", String(Math.round(previewPercent)));
+  ui.rawPaneResizer.setAttribute("aria-valuenow", String(Math.round(rawPercent)));
+}
+
+function persistPaneLayout() {
+  try { localStorage.setItem("docslaju-pane-ratios", JSON.stringify(paneRatios)); } catch (_) { /* optional */ }
+}
+
+function resizeWorkspacePane(kind, clientX) {
+  const bounds = ui.workspaceGrid.getBoundingClientRect();
+  if (bounds.width < 900) return;
+  const position = Math.max(0, Math.min(bounds.width, clientX - bounds.left));
+  if (kind === "preview") {
+    paneRatios.preview = Math.max(0.24, Math.min(0.55, position / bounds.width));
+  } else {
+    paneRatios.raw = Math.max(0.22, Math.min(0.48, (bounds.right - clientX) / bounds.width));
+  }
+  applyPaneLayout();
+}
+
+function makePaneResizer(element, kind) {
+  element.addEventListener("pointerdown", (event) => {
+    if (workspaceView === "structured" && kind === "raw") return;
+    event.preventDefault();
+    element.setPointerCapture(event.pointerId);
+    document.body.classList.add("resizing-panes");
+  });
+  element.addEventListener("pointermove", (event) => {
+    if (!element.hasPointerCapture(event.pointerId)) return;
+    resizeWorkspacePane(kind, event.clientX);
+  });
+  const stop = (event) => {
+    if (element.hasPointerCapture(event.pointerId)) element.releasePointerCapture(event.pointerId);
+    document.body.classList.remove("resizing-panes");
+    persistPaneLayout();
+  };
+  element.addEventListener("pointerup", stop);
+  element.addEventListener("pointercancel", stop);
+  element.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    event.preventDefault();
+    const direction = event.key === "ArrowRight" ? 1 : -1;
+    if (kind === "preview") paneRatios.preview = Math.max(0.24, Math.min(0.55, paneRatios.preview + direction * 0.025));
+    else paneRatios.raw = Math.max(0.22, Math.min(0.48, paneRatios.raw - direction * 0.025));
+    applyPaneLayout();
+    persistPaneLayout();
+  });
+  element.addEventListener("dblclick", () => {
+    paneRatios = { preview: 0.34, raw: 0.33 };
+    applyPaneLayout();
+    persistPaneLayout();
+  });
 }
 
 async function openStructuredView() {
@@ -2313,6 +2418,16 @@ ui.exportForm.addEventListener("submit", (event) => {
 });
 ui.extractButton.addEventListener("click", openStructuredView);
 ui.markdownViewButton.addEventListener("click", closeStructuredView);
+document.addEventListener("keydown", (event) => {
+  if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  if (event.key === "1" && !ui.markdownViewButton.disabled) {
+    event.preventDefault();
+    closeStructuredView();
+  } else if (event.key === "2" && !ui.extractButton.disabled) {
+    event.preventDefault();
+    openStructuredView();
+  }
+});
 ui.extractionProfile.addEventListener("focus", () => renderExtractionTemplateOptions(ui.extractionProfile.value));
 ui.extractionProfile.addEventListener("input", () => {
   const selected = selectedExtractionTemplate();
@@ -2441,10 +2556,25 @@ ui.toggleSidebar.addEventListener("click", () => {
   setSidebarCollapsed(!ui.appShell.classList.contains("sidebar-collapsed"));
 });
 ui.scrim.addEventListener("click", closeSidebar);
+ui.themeToggle.addEventListener("click", () => {
+  setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+});
+makePaneResizer(ui.previewPaneResizer, "preview");
+makePaneResizer(ui.rawPaneResizer, "raw");
 
 try {
   setSidebarCollapsed(localStorage.getItem("docslaju-sidebar-collapsed") === "true");
+  const savedRatios = JSON.parse(localStorage.getItem("docslaju-pane-ratios") || "null");
+  if (savedRatios && Number.isFinite(savedRatios.preview) && Number.isFinite(savedRatios.raw)) {
+    paneRatios = {
+      preview: Math.max(0.24, Math.min(0.55, savedRatios.preview)),
+      raw: Math.max(0.22, Math.min(0.48, savedRatios.raw)),
+    };
+  }
+  workspaceView = localStorage.getItem("docslaju-workspace-view") === "structured" ? "structured" : "markdown";
 } catch (_) {
   setSidebarCollapsed(false);
 }
+setTheme(document.documentElement.dataset.theme, false);
+applyPaneLayout();
 refresh().catch((error) => toast(error.message, "error"));

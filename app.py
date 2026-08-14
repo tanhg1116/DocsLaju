@@ -1103,6 +1103,11 @@ def _export_document_markdown(document: dict) -> str:
     return "\n\n---\n\n".join(sections)
 
 
+def _markdown_export_stem(document: dict) -> str:
+    stem = secure_filename(Path(document["name"]).stem) or "document"
+    return f"{stem}_markdown"
+
+
 def _render_document_pdf(session_id: str, file_id: str) -> bytes:
     print_url = (
         f"{app.config['INTERNAL_BASE_URL']}/api/sessions/"
@@ -1120,7 +1125,7 @@ def _write_markdown_package(
     markdown_payload: str,
     assets: list[dict],
 ) -> None:
-    stem = secure_filename(Path(document["name"]).stem) or "document"
+    stem = _markdown_export_stem(document)
     bundle.writestr(f"{stem}.md", markdown_payload.encode("utf-8"))
     for asset in assets:
         bundle.writestr(f"assets/{asset['filename']}", asset["content"])
@@ -1130,7 +1135,7 @@ def _write_markdown_package(
 def export_markdown(session_id: str, file_id: str) -> Response:
     document = _document(session_id, file_id)
     payload = _export_document_markdown(document)
-    stem = os.path.splitext(document["name"])[0]
+    stem = _markdown_export_stem(document)
     return Response(
         payload,
         mimetype="text/markdown",
@@ -1159,7 +1164,7 @@ def export_document_package(session_id: str, file_id: str) -> Response:
 @app.get("/api/sessions/<session_id>/files/<file_id>/export.pdf")
 def export_document_pdf(session_id: str, file_id: str) -> Response:
     document = _document(session_id, file_id)
-    stem = secure_filename(Path(document["name"]).stem) or "document"
+    stem = _markdown_export_stem(document)
     payload = _render_document_pdf(session_id, file_id)
     return send_file(
         io.BytesIO(payload),
@@ -1175,7 +1180,7 @@ def export_document_bundle(session_id: str, file_id: str) -> Response:
     markdown_payload = _export_document_markdown(document)
     assets = _db().list_document_assets(ADMIN_USER_ID, session_id, file_id)
     pdf_payload = _render_document_pdf(session_id, file_id)
-    stem = secure_filename(Path(document["name"]).stem) or "document"
+    stem = _markdown_export_stem(document)
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
         _write_markdown_package(bundle, document, markdown_payload, assets)

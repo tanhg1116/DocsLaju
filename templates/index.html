@@ -3,8 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0b0d12">
+  <meta name="theme-color" content="#f4f6f9">
   <title>DocsLaju OCR Workspace</title>
+  <script>
+    try {
+      if (localStorage.getItem("docslaju-theme") === "dark") document.documentElement.dataset.theme = "dark";
+    } catch (_) { /* Theme persistence is optional. */ }
+  </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
@@ -24,6 +29,8 @@
     <symbol id="icon-file-text" viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13h8M8 17h8M8 9h2"/></symbol>
     <symbol id="icon-file-image" viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><circle cx="10" cy="13" r="2"/><path d="m20 17-1.1-1.1a2 2 0 0 0-2.8 0L12 20"/></symbol>
     <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2.1 12a10.7 10.7 0 0 1 19.8 0 10.7 10.7 0 0 1-19.8 0Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20.9 13.2A8.5 8.5 0 1 1 10.8 3.1 6.6 6.6 0 0 0 20.9 13.2Z"/></symbol>
+    <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/></symbol>
     <symbol id="icon-code" viewBox="0 0 24 24"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6M14.5 4l-5 16"/></symbol>
     <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
     <symbol id="icon-archive" viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/></symbol>
@@ -136,14 +143,27 @@
               </div>
             </div>
             <button class="header-upload-button icon-tooltip" id="uploadButton" aria-label="Upload documents" data-tooltip="Upload documents"><svg class="ui-icon"><use href="#icon-plus"></use></svg></button>
-            <button class="header-markdown-button icon-tooltip active" id="markdownViewButton" aria-label="Show Markdown view" data-tooltip="Show Markdown view" disabled><svg class="ui-icon"><use href="#icon-code"></use></svg></button>
-            <button class="header-extract-button icon-tooltip" id="extractButton" aria-label="Extract structured data" data-tooltip="Extract structured document data" disabled><svg class="ui-icon"><use href="#icon-list-checks"></use></svg></button>
+            <div class="workspace-view-switcher" role="group" aria-label="Result view">
+              <button class="header-markdown-button active" id="markdownViewButton" aria-label="Show Markdown view" disabled><svg class="ui-icon"><use href="#icon-code"></use></svg><span>Markdown</span></button>
+              <button class="header-extract-button" id="extractButton" aria-label="Show structured data" disabled><svg class="ui-icon"><use href="#icon-list-checks"></use></svg><span>Structured</span></button>
+            </div>
             <button class="header-export-button icon-tooltip" id="exportButton" aria-label="Export document" data-tooltip="Export document" disabled><svg class="ui-icon"><use href="#icon-download"></use></svg></button>
           </div>
-          <span class="file-status" id="fileStatus">No document selected</span>
+          <div class="workspace-status-row">
+            <span class="file-status" id="fileStatus">No document selected</span>
+            <div class="workflow-status" id="workflowStatus" aria-label="Document progress" hidden>
+              <span data-workflow-step="uploaded"><i></i>Uploaded</span>
+              <span data-workflow-step="processing"><i></i>Processing</span>
+              <span data-workflow-step="review"><i></i>Needs review</span>
+              <span data-workflow-step="approved"><i></i>Approved</span>
+            </div>
+          </div>
         </div>
         <div class="topbar-actions">
           <span class="save-state" id="saveState">Ready</span>
+          <button class="theme-toggle icon-tooltip" id="themeToggle" type="button" aria-label="Switch to dark theme" aria-pressed="false" data-tooltip="Switch to dark theme">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-moon"></use></svg>
+          </button>
         </div>
       </header>
 
@@ -198,6 +218,8 @@
 
         </article>
 
+        <div class="pane-resizer" id="previewPaneResizer" role="separator" aria-label="Resize document preview" aria-orientation="vertical" aria-valuemin="24" aria-valuemax="55" tabindex="0"></div>
+
         <article class="pane pane-rendered">
           <div class="pane-title">
             <div>
@@ -246,6 +268,8 @@
             </div>
           </div>
         </article>
+
+        <div class="pane-resizer" id="rawPaneResizer" role="separator" aria-label="Resize raw Markdown panel" aria-orientation="vertical" aria-valuemin="22" aria-valuemax="48" tabindex="0"></div>
 
         <article class="pane pane-editor">
           <div class="pane-title">

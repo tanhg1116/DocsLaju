@@ -496,6 +496,10 @@ def test_sidebar_exposes_projects_and_complete_session_menu():
             b'id="retryBatchButton"',
             b'id="extractButton"',
             b'id="markdownViewButton"',
+            b'id="themeToggle"',
+            b'id="workflowStatus"',
+            b'id="previewPaneResizer"',
+            b'id="rawPaneResizer"',
             b'id="structuredPane"',
             b'id="importDocumentType"',
             b'id="extractionProfile" type="search" role="combobox"',
@@ -540,6 +544,16 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         assert b"function pastedImageFiles" in script.data
         assert b"function setExtractionEditMode" in script.data
         assert b'function setWorkspaceView' in script.data
+        assert b"function makePaneResizer" in script.data
+        assert b"docslaju-pane-ratios" in script.data
+        assert b"docslaju-workspace-view" in script.data
+        assert b"function setTheme" in script.data
+        assert b"docslaju-theme" in script.data
+        assert b".pane-resizer" in css.data
+        assert b".workflow-status" in css.data
+        assert b'html[data-theme="dark"]' in css.data
+        assert b'id="icon-moon"' in page.data
+        assert b'id="icon-sun"' in page.data
         assert b"function renderExtractionTemplateOptions" in script.data
         assert b"function normalizedTemplateSearch" in script.data
         assert b'ui.extractionProfile.addEventListener("input"' in script.data
@@ -637,9 +651,10 @@ def test_pdf_and_combined_exports_return_rendered_pdf(monkeypatch):
     assert pdf.status_code == 200
     assert pdf.content_type == "application/pdf"
     assert pdf.data == rendered_pdf
+    assert "report_markdown.pdf" in pdf.headers["Content-Disposition"]
     with zipfile.ZipFile(io.BytesIO(combined.data)) as bundle:
-        assert bundle.read("report.md").decode() == "# Rendered report"
-        assert bundle.read("report.pdf") == rendered_pdf
+        assert bundle.read("report_markdown.md").decode() == "# Rendered report"
+        assert bundle.read("report_markdown.pdf") == rendered_pdf
 
 
 def test_ocr_assets_use_short_links_render_live_export_and_cascade(isolated_database: Path):
@@ -710,7 +725,7 @@ def test_ocr_assets_use_short_links_render_live_export_and_cascade(isolated_data
         )
         assert exported.status_code == 200
         with zipfile.ZipFile(io.BytesIO(exported.data)) as bundle:
-            assert bundle.read("report.md").decode() == str(markdown)
+            assert bundle.read("report_markdown.md").decode() == str(markdown)
             assert bundle.read("assets/report-1-image-1.png") == image_bytes
 
         deleted = client.delete(f"/api/sessions/{session_id}/files/{document_id}")
@@ -1065,6 +1080,7 @@ def test_image_upload_edit_render_and_export():
         exported = client.get(f"/api/sessions/{session_id}/files/{document['id']}/export.md")
         assert exported.status_code == 200
         assert b"# Receipt" in exported.data
+        assert "receipt_markdown.md" in exported.headers["Content-Disposition"]
 
 
 def test_markdown_renderer_escapes_raw_html():
