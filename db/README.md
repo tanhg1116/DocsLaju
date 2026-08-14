@@ -11,7 +11,10 @@ db/
 ├── schema.sql                 Tables, constraints, indexes, and admin seed
 └── migrations/
     ├── 001_ocr_scheduler_indexes.sql
-    └── 002_scheduler_metrics.sql
+    ├── 002_scheduler_metrics.sql
+    ├── 003_extraction_revisions.sql
+    ├── 004_accounting_match_decisions.sql
+    └── 005_accounting_settlement_relationships.sql
 src/services/
 └── database.py               SQLite repository used by Flask routes
 instance/
@@ -29,7 +32,9 @@ users
 │       │   └── document_pages_fts (search index)
 │       ├── document_assets
 │       ├── document_extractions
+│       │   └── document_extraction_revisions
 │       ├── document_extraction_claims
+│       ├── accounting_match_decisions (anchor or related document)
 │       ├── ocr_jobs
 │       │   └── ocr_job_pages
 │       └── ocr_page_claims
@@ -54,8 +59,17 @@ users
 - Template-driven structured results are stored as JSON in
   `document_extractions`, independently from raw OCR Markdown. The template id,
   schema version, review status, and model are retained with each result.
+- `document_extraction_revisions` preserves immutable model and user snapshots
+  and is cascade-deleted with its document.
+  Provenance is therefore derived without rewriting OCR Markdown or guessing
+  whether the current value was edited.
 - `document_extraction_claims` prevents duplicate simultaneous structured API
   requests for the same document and profile.
+- `accounting_match_decisions` stores reviewer-confirmed or rejected
+  quotation/PO/delivery/invoice/credit/payment links separately from computed
+  suggestions.
+  Both document foreign keys cascade, so deleting either document removes the
+  decision without leaving an orphan relationship.
 - `document_pages.source_markdown` preserves the OCR response while `markdown`
   holds the editable version with short asset references.
 - `document_pages.preprocessing_json` records the conditional local image

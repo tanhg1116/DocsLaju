@@ -1,0 +1,38 @@
+{
+  "scenario_id": "laju-office-solutions-2026-08",
+  "accountant": "Aina",
+  "period": "2026-08",
+  "documents": [
+    {"file": "documents/01_supplier_quotation_QT-FP-081.pdf", "group": "ap-furnipro", "type": "quotation", "reference": "QT-FP-081", "date": "2026-08-01", "party": "FurniPro Sdn. Bhd.", "currency": "MYR", "total": 3564.00},
+    {"file": "documents/02_purchase_order_PO-2026-044.pdf", "group": "ap-furnipro", "type": "purchase_order", "reference": "PO-2026-044", "date": "2026-08-03", "party": "FurniPro Sdn. Bhd.", "currency": "MYR", "total": 3564.00},
+    {"file": "documents/03_delivery_order_DO-2026-118.jpg", "group": "ap-furnipro", "type": "delivery_order", "reference": "DO-2026-118", "date": "2026-08-05", "party": "FurniPro Sdn. Bhd.", "expected_condition": "nine chairs delivered although ten were ordered"},
+    {"file": "documents/04_supplier_invoice_INV-FP-338.pdf", "group": "ap-furnipro", "type": "invoice", "reference": "INV-FP-338", "date": "2026-08-05", "party": "FurniPro Sdn. Bhd.", "currency": "MYR", "subtotal": 3400.00, "discount": 100.00, "tax": 264.00, "total": 3564.00, "due_date": "2026-09-04"},
+    {"file": "documents/05_credit_note_CN-FP-019.pdf", "group": "ap-furnipro", "type": "credit_note", "reference": "CN-FP-019", "date": "2026-08-12", "party": "FurniPro Sdn. Bhd.", "currency": "MYR", "total": 345.60},
+    {"file": "documents/06_payment_confirmation_PAY-0826-017.png", "group": "ap-furnipro", "type": "payment_confirmation", "reference": "PAY-0826-017", "date": "2026-08-20", "party": "FurniPro Sdn. Bhd.", "currency": "MYR", "total": 3218.40},
+
+    {"file": "documents/10_employee_claim_EC-2026-08-014.pdf", "group": "employee-claim-amir", "type": "expense_claim", "reference": "EC-2026-08-014", "date": "2026-08-25", "party": "Amir", "currency": "MYR", "total": 496.50},
+    {"file": "documents/11_receipt_petrol_R-PET-8821.jpg", "group": "employee-claim-amir", "type": "receipt", "reference": "R-PET-8821", "date": "2026-08-11", "party": "Maju Fuel Station", "currency": "MYR", "total": 120.00},
+    {"file": "documents/12_receipt_parking_R-PARK-229.png", "group": "employee-claim-amir", "type": "receipt", "reference": "R-PARK-229", "date": "2026-08-11", "party": "KL Parking", "currency": "MYR", "total": 16.50},
+    {"file": "documents/13_receipt_parking_exact_duplicate.png", "group": "employee-claim-amir", "type": "receipt", "duplicate_of": "documents/12_receipt_parking_R-PARK-229.png"},
+    {"file": "documents/14_receipt_parking_recompressed.jpg", "group": "employee-claim-amir", "type": "receipt", "visual_duplicate_of": "documents/12_receipt_parking_R-PARK-229.png"},
+    {"file": "documents/15_hotel_invoice_HTL-883.jpg", "group": "employee-claim-amir", "type": "invoice", "reference": "HTL-883", "date": "2026-08-18", "party": "Sentral Hotel", "currency": "MYR", "total": 280.00, "image_condition": "blurred"},
+    {"file": "documents/16_receipt_meal_R-MEAL-551.jpg", "group": "employee-claim-amir", "type": "receipt", "reference": "R-MEAL-551", "date": "2026-08-18", "party": "Kedai Makan Harmoni", "currency": "MYR", "total": 45.00},
+    {"file": "documents/17_receipt_ehailing_R-RIDE-901.jpg", "group": "employee-claim-amir", "type": "receipt", "reference": "R-RIDE-901", "date": "2026-08-18", "party": "City Ride", "currency": "MYR", "total": 25.00, "image_condition": "low_resolution"},
+
+    {"file": "documents/20_customer_quotation_QT-C-055.pdf", "group": "ar-sentosa", "type": "quotation", "reference": "QT-C-055", "date": "2026-08-08", "party": "Sentosa Analytics Sdn. Bhd.", "currency": "MYR", "total": 1620.00},
+    {"file": "documents/21_customer_invoice_INV-C-204.pdf", "group": "ar-sentosa", "type": "invoice", "reference": "INV-C-204", "date": "2026-08-15", "party": "Sentosa Analytics Sdn. Bhd.", "currency": "MYR", "total": 1620.00, "due_date": "2026-09-14"},
+    {"file": "documents/22_customer_payment_advice_PA-C-88.pdf", "group": "ar-sentosa", "type": "payment_advice", "reference": "PA-C-88", "date": "2026-08-29", "party": "Sentosa Analytics Sdn. Bhd.", "currency": "MYR", "total": 1000.00, "expected_condition": "partial payment"},
+
+    {"file": "documents/30_electricity_may_2026.pdf", "group": "recurring-electricity", "type": "invoice", "reference": "ELEC-2026-05", "date": "2026-05-31", "party": "Metro Electricity", "currency": "MYR", "total": 820.00},
+    {"file": "documents/31_electricity_june_2026.pdf", "group": "recurring-electricity", "type": "invoice", "reference": "ELEC-2026-06", "date": "2026-06-30", "party": "Metro Electricity", "currency": "MYR", "total": 845.00},
+    {"file": "documents/32_electricity_july_2026.pdf", "group": "recurring-electricity", "type": "invoice", "reference": "ELEC-2026-07", "date": "2026-07-31", "party": "Metro Electricity", "currency": "MYR", "total": 830.00},
+    {"file": "documents/33_electricity_august_anomaly.pdf", "group": "recurring-electricity", "type": "invoice", "reference": "ELEC-2026-08", "date": "2026-08-31", "party": "Metro Electricity", "currency": "MYR", "total": 4850.00, "expected_condition": "amount anomaly"},
+    {"file": "documents/34_internet_august_2026.pdf", "group": "recurring-services", "type": "invoice", "reference": "NET-2026-08", "date": "2026-08-01", "party": "FastNet Business", "currency": "MYR", "total": 220.00},
+    {"file": "documents/35_software_subscription_USD.pdf", "group": "recurring-services", "type": "invoice", "reference": "SOFT-882", "date": "2026-08-02", "party": "Cloud Tools Inc.", "currency": "USD", "total": 199.00, "expected_condition": "exchange-rate evidence required"},
+
+    {"file": "documents/40_bad_arithmetic_invoice_INV-MISC-778.pdf", "group": "controlled-exceptions", "type": "invoice", "reference": "INV-MISC-778", "date": "2026-08-22", "party": "Maju Repairs", "currency": "MYR", "subtotal": 1000.00, "tax": 80.00, "total": 1090.00, "expected_calculated_total": 1080.00},
+    {"file": "documents/41_missing_reference_invoice.pdf", "group": "controlled-exceptions", "type": "invoice", "date": "2026-08-23", "party": "Office Pantry Trading", "currency": "MYR", "total": 180.00, "expected_condition": "invoice number absent"},
+    {"file": "documents/42_damaged_supplier_attachment.pdf", "group": "controlled-exceptions", "type": "invalid_pdf", "expected_condition": "upload validation rejects malformed PDF"},
+    {"file": "documents/43_vendor_statement_15_pages.pdf", "group": "ap-furnipro", "type": "statement", "reference": "ST-FP-2026-08", "date": "2026-08-31", "party": "FurniPro Sdn. Bhd.", "pages": 15}
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "scenario_id": "laju-office-solutions-2026-08",
+  "company": {
+    "name": "Laju Office Solutions Sdn. Bhd.",
+    "registration_number": "202601012345",
+    "base_currency": "MYR",
+    "accounting_period": "2026-08"
+  },
+  "review_rules": {
+    "money_tolerance": 0.02,
+    "payment_match_date_window_days": 7,
+    "possible_duplicate_score": 0.9,
+    "meal_claim_receipt_required": true,
+    "supplier_bank_detail_change_requires_review": true,
+    "foreign_currency_requires_rate_source": true
+  },
+  "tax_note": "Rates printed in fixtures are document facts for arithmetic testing only. DocsLaju must not decide tax eligibility or compliance."
+}

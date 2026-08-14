@@ -875,7 +875,175 @@ class Database:
             return None
         result = dict(row)
         result["data"] = json.loads(result.pop("data_json"))
+        with self.connect() as connection:
+            revision = connection.execute(
+                """
+                SELECT revision, origin FROM document_extraction_revisions
+                WHERE document_id = ? AND profile = ?
+                ORDER BY revision DESC LIMIT 1
+                """,
+                (document_id, profile),
+            ).fetchone()
+        result["revision"] = int(revision["revision"]) if revision else 0
+        result["last_origin"] = str(revision["origin"]) if revision else "legacy"
         return result
+
+    def get_document_extraction_source(
+        self,
+        user_id: int,
+        session_id: str,
+        document_id: str,
+        profile: str,
+    ) -> dict | None:
+        """Return the most recent provider snapshot used for provenance."""
+        self.get_document(user_id, session_id, document_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT data_json FROM document_extraction_revisions
+                WHERE document_id = ? AND profile = ?
+                  AND origin IN ('model', 'legacy')
+                ORDER BY revision DESC LIMIT 1
+                """,
+                (document_id, profile),
+            ).fetchone()
+        return json.loads(row["data_json"]) if row else None
+
+    def list_document_page_evidence(
+        self,
+        user_id: int,
+        session_id: str,
+        document_id: str,
+    ) -> list[dict]:
+        self.get_document(user_id, session_id, document_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT page_number, markdown, confidence_score, review_status
+                FROM document_pages
+                WHERE document_id = ? ORDER BY page_number
+                """,
+                (document_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_accounting_candidate_extractions(
+        self,
+        user_id: int,
+        document_id: str,
+        profile: str,
+    ) -> list[dict]:
+        """Return same-profile documents for deterministic duplicate scoring."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT e.document_id, e.data_json, d.name AS document_name,
+                       d.session_id, s.title AS session_title
+                FROM document_extractions e
+                JOIN documents d ON d.id = e.document_id
+                JOIN sessions s ON s.id = d.session_id
+                WHERE s.user_id = ? AND e.profile = ? AND e.document_id <> ?
+                ORDER BY e.updated_at DESC
+                """,
+                (user_id, profile, document_id),
+            ).fetchall()
+        return [
+            {**dict(row), "data": json.loads(row["data_json"])}
+            for row in rows
+        ]
+
+    def list_accounting_extractions(self, user_id: int) -> list[dict]:
+        """Return metadata needed to build the workspace exception queue."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT e.document_id, e.profile, e.data_json, e.status,
+                       d.name AS document_name, d.session_id,
+                       s.title AS session_title
+                FROM document_extractions e
+                JOIN documents d ON d.id = e.document_id
+                JOIN sessions s ON s.id = d.session_id
+                WHERE s.user_id = ?
+                ORDER BY e.updated_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [
+            {**dict(row), "data": json.loads(row["data_json"])}
+            for row in rows
+        ]
+
+    def list_accounting_match_decisions(self, user_id: int) -> list[dict]:
+        """Return explicit human decisions separately from computed suggestions."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT anchor_document_id, related_document_id, relationship_type,
+                       decision, note, created_at, updated_at
+                FROM accounting_match_decisions
+                WHERE user_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_accounting_match_decision(
+        self,
+        user_id: int,
+        anchor_document_id: str,
+        related_document_id: str,
+        relationship_type: str,
+        decision: str,
+        note: str | None = None,
+    ) -> dict:
+        """Persist a reviewer decision after proving both documents are owned."""
+        if anchor_document_id == related_document_id:
+            raise ValueError("A document cannot be matched to itself")
+        with self.transaction() as connection:
+            owned = connection.execute(
+                """
+                SELECT d.id
+                FROM documents d
+                JOIN sessions s ON s.id = d.session_id
+                WHERE s.user_id = ? AND d.id IN (?, ?)
+                """,
+                (user_id, anchor_document_id, related_document_id),
+            ).fetchall()
+            if len(owned) != 2:
+                raise KeyError("Accounting match document not found")
+            connection.execute(
+                """
+                INSERT INTO accounting_match_decisions
+                    (user_id, anchor_document_id, related_document_id,
+                     relationship_type, decision, note)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, anchor_document_id, related_document_id, relationship_type)
+                DO UPDATE SET
+                    decision = excluded.decision,
+                    note = excluded.note,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    user_id,
+                    anchor_document_id,
+                    related_document_id,
+                    relationship_type,
+                    decision,
+                    note,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT anchor_document_id, related_document_id, relationship_type,
+                       decision, note, created_at, updated_at
+                FROM accounting_match_decisions
+                WHERE user_id = ? AND anchor_document_id = ?
+                  AND related_document_id = ? AND relationship_type = ?
+                """,
+                (user_id, anchor_document_id, related_document_id, relationship_type),
+            ).fetchone()
+        return dict(row)
 
     def save_document_extraction(
         self,
@@ -888,10 +1056,13 @@ class Database:
         *,
         schema_version: int = 1,
         status: str = "needs_review",
+        origin: str = "model",
     ) -> dict:
         self.get_document(user_id, session_id, document_id)
         if status not in {"needs_review", "approved"}:
             raise ValueError("Unknown extraction review status")
+        if origin not in {"model", "user", "legacy"}:
+            raise ValueError("Unknown extraction origin")
         payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         with self.transaction() as connection:
             connection.execute(
@@ -911,6 +1082,23 @@ class Database:
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (document_id, profile, payload, schema_version, status, model, status),
+            )
+            latest = connection.execute(
+                """
+                SELECT COALESCE(MAX(revision), 0) AS revision
+                FROM document_extraction_revisions
+                WHERE document_id = ? AND profile = ?
+                """,
+                (document_id, profile),
+            ).fetchone()
+            revision = int(latest["revision"]) + 1
+            connection.execute(
+                """
+                INSERT INTO document_extraction_revisions
+                    (document_id, profile, revision, data_json, status, origin)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (document_id, profile, revision, payload, status, origin),
             )
         return self.get_document_extraction(
             user_id, session_id, document_id, profile

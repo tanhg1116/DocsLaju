@@ -32,14 +32,53 @@ COMMON_PROMPT = (
     "claims, or report an ordinary missing field as a review note."
 )
 
+TAX_ANNOTATION_PROMPT = (
+    " For tax_treatment, return inclusive only when the document explicitly says tax is "
+    "included in displayed prices or the total; return exclusive only when it explicitly "
+    "says tax is excluded, additional, or added to a subtotal; return not_applicable only "
+    "when the document explicitly states that no tax applies; otherwise return unknown. "
+    "Copy the shortest exact supporting source phrase into tax_evidence without paraphrasing, "
+    "or return null when there is no explicit phrase. Extract tax_rate as the printed numeric "
+    "percentage without the percent sign. Do not use arithmetic to invent any of these fields."
+)
+
+
+def _tax_schema_fields() -> dict[str, dict]:
+    return {
+        "tax_rate": _nullable("number"),
+        "tax_treatment": {
+            "type": "string",
+            "enum": ["inclusive", "exclusive", "not_applicable", "unknown"],
+        },
+        "tax_evidence": _nullable("string"),
+    }
+
+
+def _tax_layout_fields() -> list[dict]:
+    return [
+        {"key": "tax_rate", "label": "Tax rate (%)", "type": "number"},
+        {
+            "key": "tax_treatment",
+            "label": "Tax treatment",
+            "type": "choice",
+            "options": [
+                {"value": "inclusive", "label": "Included in total"},
+                {"value": "exclusive", "label": "Added to subtotal"},
+                {"value": "not_applicable", "label": "Not applicable"},
+                {"value": "unknown", "label": "Unknown / needs review"},
+            ],
+        },
+        {"key": "tax_evidence", "label": "Tax wording from document", "type": "long_text"},
+    ]
+
 
 DOCUMENT_TEMPLATES: dict[str, dict] = {
     "invoice": {
         "id": "invoice",
         "label": "Invoice",
         "description": "Supplier, billing totals, payment terms, and invoice line items.",
-        "schema_version": 1,
-        "prompt": COMMON_PROMPT + " The selected document type is invoice.",
+        "schema_version": 4,
+        "prompt": COMMON_PROMPT + " The selected document type is invoice." + TAX_ANNOTATION_PROMPT,
         "schema": _object({
             "document_type": {"type": "string", "enum": ["invoice"]},
             "supplier_name": _nullable("string"),
@@ -47,15 +86,18 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
             "supplier_address": _nullable("string"),
             "customer_name": _nullable("string"),
             "invoice_number": _nullable("string"),
+            "purchase_order_number": _nullable("string"),
             "invoice_date": _nullable("string"),
             "due_date": _nullable("string"),
             "currency": _nullable("string"),
             "subtotal": _nullable("number"),
             "discount_amount": _nullable("number"),
             "tax_amount": _nullable("number"),
+            **_tax_schema_fields(),
             "total_amount": _nullable("number"),
             "payment_terms": _nullable("string"),
             "line_items": _array({
+                "item_code": _nullable("string"),
                 "description": _nullable("string"),
                 "quantity": _nullable("number"),
                 "unit_price": _nullable("number"),
@@ -74,6 +116,7 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
                         {"key": "supplier_address", "label": "Supplier address", "type": "long_text"},
                         {"key": "customer_name", "label": "Customer", "type": "text"},
                         {"key": "invoice_number", "label": "Invoice number", "type": "text"},
+                        {"key": "purchase_order_number", "label": "Purchase order number", "type": "text"},
                         {"key": "invoice_date", "label": "Invoice date", "type": "date"},
                         {"key": "due_date", "label": "Due date", "type": "date"},
                         {"key": "currency", "label": "Currency", "type": "text"},
@@ -86,6 +129,7 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
                         {"key": "subtotal", "label": "Subtotal", "type": "number"},
                         {"key": "discount_amount", "label": "Discount", "type": "number"},
                         {"key": "tax_amount", "label": "Tax", "type": "number"},
+                        *_tax_layout_fields(),
                         {"key": "total_amount", "label": "Total", "type": "number"},
                     ],
                 },
@@ -94,6 +138,7 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
                 "key": "line_items",
                 "title": "Line items",
                 "columns": [
+                    {"key": "item_code", "label": "Item code", "type": "text"},
                     {"key": "description", "label": "Description", "type": "text"},
                     {"key": "quantity", "label": "Qty", "type": "number"},
                     {"key": "unit_price", "label": "Unit price", "type": "number"},
@@ -108,8 +153,8 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
         "id": "receipt",
         "label": "Receipt",
         "description": "Merchant, transaction totals, payment details, and purchased items.",
-        "schema_version": 1,
-        "prompt": COMMON_PROMPT + " The selected document type is receipt.",
+        "schema_version": 2,
+        "prompt": COMMON_PROMPT + " The selected document type is receipt." + TAX_ANNOTATION_PROMPT,
         "schema": _object({
             "document_type": {"type": "string", "enum": ["receipt"]},
             "merchant_name": _nullable("string"),
@@ -121,6 +166,7 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
             "subtotal": _nullable("number"),
             "discount_amount": _nullable("number"),
             "tax_amount": _nullable("number"),
+            **_tax_schema_fields(),
             "total_amount": _nullable("number"),
             "payment_method": _nullable("string"),
             "purchased_items": _array({
@@ -151,6 +197,7 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
                         {"key": "subtotal", "label": "Subtotal", "type": "number"},
                         {"key": "discount_amount", "label": "Discount", "type": "number"},
                         {"key": "tax_amount", "label": "Tax", "type": "number"},
+                        *_tax_layout_fields(),
                         {"key": "total_amount", "label": "Total", "type": "number"},
                     ],
                 },
@@ -172,13 +219,13 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
         "id": "quotation",
         "label": "Quotation",
         "description": "Supplier proposal, customer details, validity, terms, totals, and quoted items.",
-        "schema_version": 1,
+        "schema_version": 2,
         "prompt": COMMON_PROMPT + (
             " The selected document type is quotation. Preserve quotation references and item "
             "codes as text. Extract validity, payment, delivery, and warranty terms only when "
             "explicitly printed. Line-item and total amounts must match the document without "
             "recalculation."
-        ),
+        ) + TAX_ANNOTATION_PROMPT,
         "schema": _object({
             "document_type": {"type": "string", "enum": ["quotation"]},
             "supplier_name": _nullable("string"),
@@ -195,6 +242,7 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
             "subtotal": _nullable("number"),
             "discount_amount": _nullable("number"),
             "tax_amount": _nullable("number"),
+            **_tax_schema_fields(),
             "total_amount": _nullable("number"),
             "payment_terms": _nullable("string"),
             "delivery_terms": _nullable("string"),
@@ -243,6 +291,7 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
                         {"key": "subtotal", "label": "Subtotal", "type": "number"},
                         {"key": "discount_amount", "label": "Discount", "type": "number"},
                         {"key": "tax_amount", "label": "Tax", "type": "number"},
+                        *_tax_layout_fields(),
                         {"key": "total_amount", "label": "Total", "type": "number"},
                     ],
                 },
@@ -261,6 +310,255 @@ DOCUMENT_TEMPLATES: dict[str, dict] = {
                     {"key": "amount", "label": "Amount", "type": "number"},
                 ],
             }],
+            "lists": [{"key": "review_notes", "label": "Review notes"}],
+        },
+    },
+    "purchase_order": {
+        "id": "purchase_order",
+        "label": "Purchase Order",
+        "description": "Buyer, supplier, commercial totals, and ordered line items.",
+        "schema_version": 1,
+        "prompt": COMMON_PROMPT + (
+            " The selected document type is purchase order. Preserve the purchase order and "
+            "quotation references exactly. Extract ordered quantities and prices only as printed."
+        ) + TAX_ANNOTATION_PROMPT,
+        "schema": _object({
+            "document_type": {"type": "string", "enum": ["purchase_order"]},
+            "buyer_name": _nullable("string"),
+            "supplier_name": _nullable("string"),
+            "supplier_registration_number": _nullable("string"),
+            "purchase_order_number": _nullable("string"),
+            "purchase_order_date": _nullable("string"),
+            "quotation_number": _nullable("string"),
+            "currency": _nullable("string"),
+            "subtotal": _nullable("number"),
+            "discount_amount": _nullable("number"),
+            "tax_amount": _nullable("number"),
+            **_tax_schema_fields(),
+            "total_amount": _nullable("number"),
+            "delivery_address": _nullable("string"),
+            "payment_terms": _nullable("string"),
+            "line_items": _array({
+                "item_code": _nullable("string"),
+                "description": _nullable("string"),
+                "quantity": _nullable("number"),
+                "unit": _nullable("string"),
+                "unit_price": _nullable("number"),
+                "tax_amount": _nullable("number"),
+                "amount": _nullable("number"),
+            }),
+            "review_notes": {"type": "array", "items": {"type": "string"}},
+        }),
+        "layout": {
+            "sections": [
+                {
+                    "title": "Purchase order details",
+                    "fields": [
+                        {"key": "buyer_name", "label": "Buyer", "type": "text"},
+                        {"key": "supplier_name", "label": "Supplier", "type": "text"},
+                        {"key": "supplier_registration_number", "label": "Registration number", "type": "text"},
+                        {"key": "purchase_order_number", "label": "Purchase order number", "type": "text"},
+                        {"key": "purchase_order_date", "label": "Purchase order date", "type": "date"},
+                        {"key": "quotation_number", "label": "Quotation number", "type": "text"},
+                        {"key": "currency", "label": "Currency", "type": "text"},
+                        {"key": "delivery_address", "label": "Delivery address", "type": "long_text"},
+                        {"key": "payment_terms", "label": "Payment terms", "type": "long_text"},
+                    ],
+                },
+                {
+                    "title": "Totals",
+                    "fields": [
+                        {"key": "subtotal", "label": "Subtotal", "type": "number"},
+                        {"key": "discount_amount", "label": "Discount", "type": "number"},
+                        {"key": "tax_amount", "label": "Tax", "type": "number"},
+                        *_tax_layout_fields(),
+                        {"key": "total_amount", "label": "Total", "type": "number"},
+                    ],
+                },
+            ],
+            "tables": [{
+                "key": "line_items",
+                "title": "Ordered items",
+                "columns": [
+                    {"key": "item_code", "label": "Item code", "type": "text"},
+                    {"key": "description", "label": "Description", "type": "text"},
+                    {"key": "quantity", "label": "Qty", "type": "number"},
+                    {"key": "unit", "label": "Unit", "type": "text"},
+                    {"key": "unit_price", "label": "Unit price", "type": "number"},
+                    {"key": "tax_amount", "label": "Tax", "type": "number"},
+                    {"key": "amount", "label": "Amount", "type": "number"},
+                ],
+            }],
+            "lists": [{"key": "review_notes", "label": "Review notes"}],
+        },
+    },
+    "delivery_order": {
+        "id": "delivery_order",
+        "label": "Delivery Order",
+        "description": "Supplier, recipient, linked purchase order, and delivered quantities.",
+        "schema_version": 1,
+        "prompt": COMMON_PROMPT + (
+            " The selected document type is delivery order. Preserve delivery and purchase "
+            "order references exactly. Extract delivered quantities, not ordered quantities."
+        ),
+        "schema": _object({
+            "document_type": {"type": "string", "enum": ["delivery_order"]},
+            "supplier_name": _nullable("string"),
+            "recipient_name": _nullable("string"),
+            "delivery_order_number": _nullable("string"),
+            "delivery_date": _nullable("string"),
+            "purchase_order_number": _nullable("string"),
+            "invoice_number": _nullable("string"),
+            "delivery_address": _nullable("string"),
+            "delivered_items": _array({
+                "item_code": _nullable("string"),
+                "description": _nullable("string"),
+                "quantity": _nullable("number"),
+                "unit": _nullable("string"),
+            }),
+            "received_by": _nullable("string"),
+            "review_notes": {"type": "array", "items": {"type": "string"}},
+        }),
+        "layout": {
+            "sections": [{
+                "title": "Delivery details",
+                "fields": [
+                    {"key": "supplier_name", "label": "Supplier", "type": "text"},
+                    {"key": "recipient_name", "label": "Recipient", "type": "text"},
+                    {"key": "delivery_order_number", "label": "Delivery order number", "type": "text"},
+                    {"key": "delivery_date", "label": "Delivery date", "type": "date"},
+                    {"key": "purchase_order_number", "label": "Purchase order number", "type": "text"},
+                    {"key": "invoice_number", "label": "Invoice number", "type": "text"},
+                    {"key": "delivery_address", "label": "Delivery address", "type": "long_text"},
+                    {"key": "received_by", "label": "Received by", "type": "text"},
+                ],
+            }],
+            "tables": [{
+                "key": "delivered_items",
+                "title": "Delivered items",
+                "columns": [
+                    {"key": "item_code", "label": "Item code", "type": "text"},
+                    {"key": "description", "label": "Description", "type": "text"},
+                    {"key": "quantity", "label": "Delivered qty", "type": "number"},
+                    {"key": "unit", "label": "Unit", "type": "text"},
+                ],
+            }],
+            "lists": [{"key": "review_notes", "label": "Review notes"}],
+        },
+    },
+    "credit_note": {
+        "id": "credit_note",
+        "label": "Credit Note",
+        "description": "Supplier credit linked to an invoice, including adjustments and credited items.",
+        "schema_version": 1,
+        "prompt": COMMON_PROMPT + (
+            " The selected document type is credit note. Preserve the credit-note and original "
+            "invoice references exactly. Represent credited monetary fields as non-negative "
+            "magnitudes even when the document displays a minus sign. If the credited magnitude "
+            "is ambiguous, return null and explain why in review_notes. Do not apply the credit "
+            "to an invoice."
+        ),
+        "schema": _object({
+            "document_type": {"type": "string", "enum": ["credit_note"]},
+            "supplier_name": _nullable("string"),
+            "customer_name": _nullable("string"),
+            "credit_note_number": _nullable("string"),
+            "credit_note_date": _nullable("string"),
+            "invoice_number": _nullable("string"),
+            "currency": _nullable("string"),
+            "subtotal": _nullable("number"),
+            "tax_amount": _nullable("number"),
+            "total_amount": _nullable("number"),
+            "reason": _nullable("string"),
+            "line_items": _array({
+                "item_code": _nullable("string"),
+                "description": _nullable("string"),
+                "quantity": _nullable("number"),
+                "unit_price": _nullable("number"),
+                "amount": _nullable("number"),
+            }),
+            "review_notes": {"type": "array", "items": {"type": "string"}},
+        }),
+        "layout": {
+            "sections": [
+                {
+                    "title": "Credit note details",
+                    "fields": [
+                        {"key": "supplier_name", "label": "Supplier", "type": "text"},
+                        {"key": "customer_name", "label": "Customer", "type": "text"},
+                        {"key": "credit_note_number", "label": "Credit note number", "type": "text"},
+                        {"key": "credit_note_date", "label": "Credit note date", "type": "date"},
+                        {"key": "invoice_number", "label": "Original invoice number", "type": "text"},
+                        {"key": "currency", "label": "Currency", "type": "text"},
+                        {"key": "reason", "label": "Reason", "type": "long_text"},
+                    ],
+                },
+                {
+                    "title": "Credit totals",
+                    "fields": [
+                        {"key": "subtotal", "label": "Subtotal", "type": "number"},
+                        {"key": "tax_amount", "label": "Tax adjustment", "type": "number"},
+                        {"key": "total_amount", "label": "Credit total", "type": "number"},
+                    ],
+                },
+            ],
+            "tables": [{
+                "key": "line_items",
+                "title": "Credited items",
+                "columns": [
+                    {"key": "item_code", "label": "Item code", "type": "text"},
+                    {"key": "description", "label": "Description", "type": "text"},
+                    {"key": "quantity", "label": "Qty", "type": "number"},
+                    {"key": "unit_price", "label": "Unit price", "type": "number"},
+                    {"key": "amount", "label": "Amount", "type": "number"},
+                ],
+            }],
+            "lists": [{"key": "review_notes", "label": "Review notes"}],
+        },
+    },
+    "payment_confirmation": {
+        "id": "payment_confirmation",
+        "label": "Payment Confirmation",
+        "description": "Payment reference, payee, linked invoice or credit note, and transferred amount.",
+        "schema_version": 1,
+        "prompt": COMMON_PROMPT + (
+            " The selected document type is payment confirmation or remittance record. Preserve "
+            "payment, invoice, and credit-note references exactly. Extract only the transferred "
+            "amount printed by the document; do not calculate an invoice balance."
+        ),
+        "schema": _object({
+            "document_type": {"type": "string", "enum": ["payment_confirmation"]},
+            "payment_reference": _nullable("string"),
+            "payment_date": _nullable("string"),
+            "payer_name": _nullable("string"),
+            "payee_name": _nullable("string"),
+            "invoice_number": _nullable("string"),
+            "credit_note_number": _nullable("string"),
+            "currency": _nullable("string"),
+            "amount": _nullable("number"),
+            "payment_status": _nullable("string"),
+            "payment_method": _nullable("string"),
+            "bank_reference": _nullable("string"),
+            "review_notes": {"type": "array", "items": {"type": "string"}},
+        }),
+        "layout": {
+            "sections": [{
+                "title": "Payment details",
+                "fields": [
+                    {"key": "payment_reference", "label": "Payment reference", "type": "text"},
+                    {"key": "payment_date", "label": "Payment date", "type": "date"},
+                    {"key": "payer_name", "label": "Payer", "type": "text"},
+                    {"key": "payee_name", "label": "Payee", "type": "text"},
+                    {"key": "invoice_number", "label": "Invoice number", "type": "text"},
+                    {"key": "credit_note_number", "label": "Credit note number", "type": "text"},
+                    {"key": "currency", "label": "Currency", "type": "text"},
+                    {"key": "amount", "label": "Amount paid", "type": "number"},
+                    {"key": "payment_status", "label": "Payment status", "type": "text"},
+                    {"key": "payment_method", "label": "Payment method", "type": "text"},
+                    {"key": "bank_reference", "label": "Bank reference", "type": "text"},
+                ],
+            }],
+            "tables": [],
             "lists": [{"key": "review_notes", "label": "Review notes"}],
         },
     },

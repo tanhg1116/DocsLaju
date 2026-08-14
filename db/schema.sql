@@ -149,6 +149,21 @@ CREATE TABLE IF NOT EXISTS document_extractions (
     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
 
+-- Immutable snapshots distinguish provider-extracted values from subsequent
+-- user corrections. The current editable copy remains in document_extractions.
+CREATE TABLE IF NOT EXISTS document_extraction_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    data_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('needs_review', 'approved')),
+    origin TEXT NOT NULL CHECK (origin IN ('model', 'user', 'legacy')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+    UNIQUE (document_id, profile, revision)
+);
+
 CREATE TABLE IF NOT EXISTS document_extraction_claims (
     document_id TEXT NOT NULL,
     profile TEXT NOT NULL,
@@ -156,6 +171,35 @@ CREATE TABLE IF NOT EXISTS document_extraction_claims (
     PRIMARY KEY (document_id, profile),
     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
+
+-- Human decisions are stored separately from deterministic match suggestions.
+-- Either linked document deleting cascades the relationship safely.
+CREATE TABLE IF NOT EXISTS accounting_match_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    anchor_document_id TEXT NOT NULL,
+    related_document_id TEXT NOT NULL,
+    relationship_type TEXT NOT NULL
+        CHECK (relationship_type IN (
+            'quotation_to_purchase_order',
+            'purchase_order_to_delivery',
+            'purchase_order_to_invoice',
+            'purchase_order_to_credit_note',
+            'purchase_order_to_payment'
+        )),
+    decision TEXT NOT NULL CHECK (decision IN ('confirmed', 'rejected')),
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (anchor_document_id) REFERENCES documents(id) ON DELETE CASCADE,
+    FOREIGN KEY (related_document_id) REFERENCES documents(id) ON DELETE CASCADE,
+    UNIQUE (user_id, anchor_document_id, related_document_id, relationship_type),
+    CHECK (anchor_document_id <> related_document_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_accounting_match_decisions_user
+    ON accounting_match_decisions (user_id, anchor_document_id, relationship_type);
 
 CREATE TABLE IF NOT EXISTS ocr_jobs (
     id TEXT PRIMARY KEY,
@@ -229,6 +273,9 @@ CREATE INDEX IF NOT EXISTS idx_documents_session
 
 CREATE INDEX IF NOT EXISTS idx_document_assets_session
     ON document_assets (session_id, document_id, page_number);
+
+CREATE INDEX IF NOT EXISTS idx_extraction_revisions_document
+    ON document_extraction_revisions (document_id, profile, revision DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ocr_jobs_one_active_document
     ON ocr_jobs (document_id)

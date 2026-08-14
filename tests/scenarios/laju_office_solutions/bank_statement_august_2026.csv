@@ -1,0 +1,5 @@
+date,description,reference,debit_myr,credit_myr,balance_myr
+2026-08-01,Opening balance,OPEN,,,25000.00
+2026-08-20,Transfer to FurniPro Sdn. Bhd.,PAY-0826-017,3218.40,,21781.60
+2026-08-29,Receipt from Sentosa Analytics Sdn. Bhd.,PA-C-88,,1000.00,22781.60
+2026-08-31,FastNet Business auto debit,NET-2026-08,220.00,,22561.60

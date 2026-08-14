@@ -52,6 +52,10 @@
     <symbol id="icon-flag" viewBox="0 0 24 24"><path d="M5 22V4M5 4c5-4 9 4 14 0v10c-5 4-9-4-14 0"/></symbol>
     <symbol id="icon-circle-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
     <symbol id="icon-list-checks" viewBox="0 0 24 24"><path d="m3 7 2 2 4-4M3 17l2 2 4-4M13 6h8M13 12h8M13 18h8"/></symbol>
+    <symbol id="icon-calculator" viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 6h8v4H8zM8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"/></symbol>
+    <symbol id="icon-alert-triangle" viewBox="0 0 24 24"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="icon-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/></symbol>
+    <symbol id="icon-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="m9 12 2 2 4-4"/></symbol>
   </svg>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
@@ -329,7 +333,48 @@
                 <button class="button button-primary" id="runExtractionButton" type="button">Extract structured data</button>
               </div>
               <div class="extraction-editor" id="extractionEditor" hidden>
-                <div id="extractionDynamicFields"></div>
+                <div class="structured-content-grid">
+                  <div id="extractionDynamicFields"></div>
+                  <aside class="accounting-review-panel" id="accountingReviewPanel" aria-label="Accounting review assistance" hidden>
+                    <div class="accounting-review-heading">
+                      <span><svg class="ui-icon" aria-hidden="true"><use href="#icon-shield-check"></use></svg></span>
+                      <div>
+                        <h3>Review assistance</h3>
+                        <p>Deterministic checks only. You remain in control.</p>
+                      </div>
+                    </div>
+                    <div class="accounting-review-summary" id="accountingReviewSummary"></div>
+                    <section class="accounting-review-section">
+                      <div class="accounting-section-title">
+                        <strong>Exceptions</strong>
+                        <span id="accountingIssueCount">0</span>
+                      </div>
+                      <div class="accounting-issue-list" id="accountingIssueList"></div>
+                    </section>
+                    <section class="accounting-review-section">
+                      <div class="accounting-section-title">
+                        <strong>Transparent calculations</strong>
+                        <svg class="ui-icon" aria-hidden="true"><use href="#icon-calculator"></use></svg>
+                      </div>
+                      <div class="accounting-calculation-list" id="accountingCalculationList"></div>
+                    </section>
+                    <section class="accounting-review-section">
+                      <div class="accounting-section-title">
+                        <strong>Purchasing bundle</strong>
+                        <span id="accountingMatchCount">0</span>
+                      </div>
+                      <div class="accounting-match-list" id="accountingMatchList"></div>
+                    </section>
+                    <section class="accounting-review-section">
+                      <div class="accounting-section-title">
+                        <strong>Workspace review queue</strong>
+                        <span id="accountingQueueCount">0</span>
+                      </div>
+                      <div class="accounting-queue-list" id="accountingQueueList"></div>
+                    </section>
+                    <p class="accounting-disclaimer" id="accountingDisclaimer"></p>
+                  </aside>
+                </div>
               </div>
             </div>
 

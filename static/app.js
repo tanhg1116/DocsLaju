@@ -18,6 +18,12 @@ import {
   renderMath,
 } from "./modules/markdown-layout.js";
 import { iconMarkup, setIconButton } from "./modules/ui-icons.js";
+import {
+  createProvenanceChip,
+  renderAccountingMatches as renderAccountingMatchesUi,
+  renderAccountingQueue as renderAccountingQueueUi,
+  renderAccountingReview as renderAccountingReviewUi,
+} from "./modules/accounting-review.js";
 
 const ui = {
   workspaceGrid: document.querySelector("#workspaceGrid"),
@@ -117,6 +123,16 @@ const ui = {
   extractionCsv: document.querySelector("#extractionCsv"),
   importDocumentType: document.querySelector("#importDocumentType"),
   extractionDynamicFields: document.querySelector("#extractionDynamicFields"),
+  accountingReviewPanel: document.querySelector("#accountingReviewPanel"),
+  accountingReviewSummary: document.querySelector("#accountingReviewSummary"),
+  accountingIssueCount: document.querySelector("#accountingIssueCount"),
+  accountingIssueList: document.querySelector("#accountingIssueList"),
+  accountingCalculationList: document.querySelector("#accountingCalculationList"),
+  accountingMatchCount: document.querySelector("#accountingMatchCount"),
+  accountingMatchList: document.querySelector("#accountingMatchList"),
+  accountingQueueCount: document.querySelector("#accountingQueueCount"),
+  accountingQueueList: document.querySelector("#accountingQueueList"),
+  accountingDisclaimer: document.querySelector("#accountingDisclaimer"),
   exportDialog: document.querySelector("#exportDialog"),
   exportForm: document.querySelector("#exportForm"),
   exportDocumentLabel: document.querySelector("#exportDocumentLabel"),
@@ -164,6 +180,9 @@ let searchTimer = null;
 let searchGeneration = 0;
 let searchHighlight = null;
 let currentExtraction = null;
+let currentAccountingReview = null;
+let accountingReviewQueue = [];
+let accountingMatchGroups = [];
 let extractionTemplates = [];
 let currentExtractionLayout = null;
 let extractionEditMode = false;
@@ -1609,28 +1628,195 @@ async function selectExtractionTemplate(template) {
   await loadExtractionForTemplate();
 }
 
+function provenanceFor(path) {
+  return currentAccountingReview?.provenance?.[path] || null;
+}
+
+function extractionInputForPath(path) {
+  if (!path) return null;
+  const nested = path.match(/^([^[]+)\[(\d+)]\.([^.]+)$/);
+  if (!nested) {
+    return ui.extractionDynamicFields.querySelector(`[data-extraction-field="${CSS.escape(path)}"]`);
+  }
+  const rows = ui.extractionDynamicFields.querySelectorAll(
+    `[data-extraction-table-row="${CSS.escape(nested[1])}"]`,
+  );
+  return rows[Number(nested[2])]?.querySelector(
+    `[data-extraction-column="${CSS.escape(nested[3])}"]`,
+  ) || null;
+}
+
+async function revealAccountingEvidence(path) {
+  const provenance = provenanceFor(path);
+  const input = extractionInputForPath(path);
+  input?.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (provenance?.source_page && activeDocument()?.current_page !== provenance.source_page) {
+    await changePage(provenance.source_page);
+  }
+  ui.documentStage.classList.add("evidence-pulse");
+  setTimeout(() => ui.documentStage.classList.remove("evidence-pulse"), 900);
+  const location = provenance?.source_page ? `page ${provenance.source_page}` : "the original document";
+  const excerpt = provenance?.source_excerpt ? ` · “${provenance.source_excerpt}”` : "";
+  toast(`${provenance?.label || "Review value"} · compare with ${location}${excerpt}`);
+}
+
+function provenanceChip(path, compact = false) {
+  const provenance = provenanceFor(path);
+  return createProvenanceChip(provenance, path, {
+    iconMarkup,
+    compact,
+    onReveal: (fieldPath) => revealAccountingEvidence(fieldPath).catch((error) => toast(error.message, "error")),
+  });
+}
+
+function renderAccountingQueue() {
+  renderAccountingQueueUi(
+    { list: ui.accountingQueueList, count: ui.accountingQueueCount },
+    accountingReviewQueue,
+    activeDocument()?.id,
+    {
+      iconMarkup,
+      onOpen: async (item) => {
+      if (item.document_id === activeDocument()?.id) return;
+      try {
+        state = await api("/api/search/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(item),
+        });
+        renderState();
+      } catch (error) {
+        toast(error.message, "error");
+      }
+      },
+    },
+  );
+}
+
+async function loadAccountingQueue() {
+  try {
+    const payload = await api("/api/accounting/review-queue");
+    accountingReviewQueue = payload.items || [];
+  } catch (error) {
+    accountingReviewQueue = [];
+    toast(`Review queue unavailable: ${error.message}`, "error");
+  }
+  renderAccountingQueue();
+}
+
+async function openAccountingDocument(item) {
+  if (item.document_id === activeDocument()?.id) return;
+  state = await api("/api/search/open", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...item, page_number: item.page_number || 1 }),
+  });
+  renderState();
+}
+
+function renderAccountingMatches() {
+  renderAccountingMatchesUi(
+    { list: ui.accountingMatchList, count: ui.accountingMatchCount },
+    accountingMatchGroups,
+    activeDocument()?.id,
+    {
+      iconMarkup,
+      onOpen: (item) => openAccountingDocument(item).catch((error) => toast(error.message, "error")),
+      onDecision: async (anchor, link, decision) => {
+        try {
+          const payload = await api("/api/accounting/matches/decision", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              anchor_document_id: anchor.document_id,
+              related_document_id: link.document.document_id,
+              relationship_type: link.relationship,
+              decision,
+            }),
+          });
+          accountingMatchGroups = payload.groups || [];
+          renderAccountingMatches();
+          toast(decision === "confirmed" ? "Document match confirmed" : "Document match rejected");
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      },
+    },
+  );
+}
+
+async function loadAccountingMatches() {
+  try {
+    const payload = await api("/api/accounting/matches");
+    accountingMatchGroups = payload.groups || [];
+  } catch (error) {
+    accountingMatchGroups = [];
+    toast(`Document matching unavailable: ${error.message}`, "error");
+  }
+  renderAccountingMatches();
+}
+
+function renderAccountingReview(review) {
+  currentAccountingReview = review;
+  renderAccountingReviewUi({
+    panel: ui.accountingReviewPanel,
+    summary: ui.accountingReviewSummary,
+    issueCount: ui.accountingIssueCount,
+    issueList: ui.accountingIssueList,
+    calculationList: ui.accountingCalculationList,
+    disclaimer: ui.accountingDisclaimer,
+  }, review, {
+    iconMarkup,
+    onIssue: (issue) => revealAccountingEvidence(issue.field_path).catch((error) => toast(error.message, "error")),
+  });
+  renderAccountingMatches();
+  renderAccountingQueue();
+}
+
 function extractionInput(definition, value, dataAttribute, dataValue) {
-  const input = definition.type === "long_text" ? document.createElement("textarea") : document.createElement("input");
+  let input;
+  if (definition.type === "choice") {
+    input = document.createElement("select");
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "–";
+    input.append(blank);
+    for (const choice of definition.options || []) {
+      const option = document.createElement("option");
+      option.value = choice.value;
+      option.textContent = choice.label;
+      input.append(option);
+    }
+  } else {
+    input = definition.type === "long_text" ? document.createElement("textarea") : document.createElement("input");
+  }
   if (input instanceof HTMLInputElement) {
     input.type = definition.type === "number" ? "number" : "text";
     if (input.type === "number") input.step = "any";
-  } else {
+  } else if (input instanceof HTMLTextAreaElement) {
     input.rows = 3;
   }
   input.dataset[dataAttribute] = dataValue;
   input.value = value ?? "";
-  input.placeholder = "–";
+  if (!(input instanceof HTMLSelectElement)) input.placeholder = "–";
   return input;
 }
 
-function addExtractionTableRow(table, item = {}) {
+function addExtractionTableRow(table, item = {}, sourceIndex = null) {
   const row = document.createElement("tr");
   row.dataset.extractionTableRow = table.key;
+  const body = ui.extractionDynamicFields.querySelector(`[data-extraction-table-body="${CSS.escape(table.key)}"]`);
+  const rowIndex = sourceIndex ?? body?.children.length ?? 0;
   for (const column of table.columns) {
     const cell = document.createElement("td");
     const input = extractionInput(column, item[column.key], "extractionColumn", column.key);
     input.setAttribute("aria-label", column.label);
-    cell.append(input);
+    const control = document.createElement("div");
+    control.className = "extraction-cell-control";
+    control.append(input);
+    const chip = provenanceChip(`${table.key}[${rowIndex}].${column.key}`, true);
+    if (chip) control.append(chip);
+    cell.append(control);
     row.append(cell);
   }
   const action = document.createElement("td");
@@ -1642,7 +1828,7 @@ function addExtractionTableRow(table, item = {}) {
   remove.addEventListener("click", () => row.remove());
   action.append(remove);
   row.append(action);
-  ui.extractionDynamicFields.querySelector(`[data-extraction-table-body="${CSS.escape(table.key)}"]`)?.append(row);
+  body?.append(row);
 }
 
 function renderExtractionLayout(data) {
@@ -1657,9 +1843,14 @@ function renderExtractionLayout(data) {
     fields.className = "extraction-fields";
     for (const definition of section.fields || []) {
       const label = document.createElement("label");
+      const captionRow = document.createElement("span");
+      captionRow.className = "extraction-field-caption";
       const caption = document.createElement("span");
       caption.textContent = definition.label;
-      label.append(caption, extractionInput(definition, data[definition.key], "extractionField", definition.key));
+      captionRow.append(caption);
+      const chip = provenanceChip(definition.key);
+      if (chip) captionRow.append(chip);
+      label.append(captionRow, extractionInput(definition, data[definition.key], "extractionField", definition.key));
       fields.append(label);
     }
     wrapper.append(heading, fields);
@@ -1698,13 +1889,18 @@ function renderExtractionLayout(data) {
     scroll.append(tableElement);
     wrapper.append(heading, scroll);
     ui.extractionDynamicFields.append(wrapper);
-    for (const item of data[table.key] || []) addExtractionTableRow(table, item);
+    for (const [index, item] of (data[table.key] || []).entries()) addExtractionTableRow(table, item, index);
   }
   for (const list of currentExtractionLayout.lists || []) {
     const label = document.createElement("label");
     label.className = "extraction-notes";
     const caption = document.createElement("span");
-    caption.textContent = list.label;
+    caption.className = "extraction-field-caption";
+    const captionText = document.createElement("span");
+    captionText.textContent = list.label;
+    caption.append(captionText);
+    const chip = provenanceChip(list.key);
+    if (chip) caption.append(chip);
     const textarea = document.createElement("textarea");
     textarea.rows = 3;
     textarea.placeholder = "–";
@@ -1724,11 +1920,12 @@ function setExtractionBusy(isBusy, message = "") {
 function setExtractionEditMode(isEditing) {
   extractionEditMode = Boolean(isEditing && currentExtraction);
   ui.structuredPane.classList.toggle("is-editing", extractionEditMode);
-  for (const control of ui.extractionDynamicFields.querySelectorAll("input, textarea")) {
-    control.readOnly = !extractionEditMode;
+  for (const control of ui.extractionDynamicFields.querySelectorAll("input, textarea, select")) {
+    if (control instanceof HTMLSelectElement) control.disabled = !extractionEditMode;
+    else control.readOnly = !extractionEditMode;
   }
   for (const control of ui.extractionDynamicFields.querySelectorAll("button")) {
-    control.disabled = !extractionEditMode;
+    control.disabled = control.classList.contains("provenance-chip") ? false : !extractionEditMode;
   }
   ui.editExtractionButton.hidden = !currentExtraction || extractionEditMode;
   ui.saveExtractionButton.hidden = !currentExtraction || !extractionEditMode;
@@ -1738,8 +1935,9 @@ function setExtractionEditMode(isEditing) {
   if (extractionEditMode) closeExtractionTemplateMenu();
 }
 
-function renderExtraction(extraction) {
+function renderExtraction(extraction, accountingReview = null) {
   currentExtraction = extraction;
+  currentAccountingReview = accountingReview;
   const hasResult = Boolean(extraction?.data);
   ui.extractionEmpty.hidden = hasResult;
   ui.extractionEditor.hidden = !hasResult;
@@ -1750,12 +1948,17 @@ function renderExtraction(extraction) {
     ui.extractionStatus.hidden = true;
     ui.extractionModel.textContent = "";
     ui.extractionDynamicFields.replaceChildren();
+    ui.accountingReviewPanel.hidden = true;
     setExtractionEditMode(false);
     return;
   }
 
-  const data = extraction.data;
+  const data = {
+    ...extraction.data,
+    ...(accountingReview?.suggested_fields || {}),
+  };
   renderExtractionLayout(data);
+  renderAccountingReview(accountingReview);
   const approved = extraction.status === "approved";
   ui.extractionStatus.textContent = approved ? "Approved" : "Needs review";
   ui.extractionStatus.className = `badge ${approved ? "complete" : "needs-review"}`;
@@ -1797,7 +2000,7 @@ async function loadExtractionForTemplate() {
     renderExtraction(null);
     ui.runExtractionButton.disabled = true;
     ui.runExtractionButton.textContent = "Choose a document type";
-    ui.extractionEmptyMessage.textContent = "Choose Invoice, Receipt, Quotation, or CV / Résumé to load its fields and tables.";
+    ui.extractionEmptyMessage.textContent = "Choose a document type to load its fields and tables.";
     ui.extractionMessage.textContent = "";
     ui.extractionMessage.classList.remove("error", "warning");
     ui.extractionStatus.hidden = true;
@@ -1823,7 +2026,7 @@ async function loadExtractionForTemplate() {
   try {
     const payload = await api(extractionEndpoint());
     currentExtractionLayout = payload.layout;
-    renderExtraction(payload.extraction);
+    renderExtraction(payload.extraction, payload.accounting_review);
     const outdated = payload.extraction && Number(payload.extraction.schema_version || 1) < Number(payload.schema_version || 1);
     ui.extractionMessage.textContent = outdated
       ? `This saved result uses ${template.label} template v${payload.extraction.schema_version || 1}. Run again to update it to v${payload.schema_version}.`
@@ -1922,6 +2125,7 @@ async function openStructuredView() {
     ui.extractionProfile.dataset.templateId = template?.id || "";
     ui.extractionProfile.value = template?.label || "";
     await loadExtractionForTemplate();
+    await Promise.all([loadAccountingQueue(), loadAccountingMatches()]);
   } catch (error) {
     ui.extractionMessage.textContent = error.message;
     ui.extractionMessage.classList.add("error");
@@ -1947,7 +2151,8 @@ async function runStructuredExtraction(confirmRerun = false) {
     : `Running OCR and ${template.label.toLowerCase()} extraction in one request…`);
   try {
     const payload = await api(extractionEndpoint("/run"), { method: "POST" });
-    renderExtraction(payload.extraction);
+    renderExtraction(payload.extraction, payload.accounting_review);
+    await Promise.all([loadAccountingQueue(), loadAccountingMatches()]);
     if (payload.ocr_included) {
       state = await api("/api/state");
       renderState({ refreshPreview: false });
@@ -1972,7 +2177,8 @@ async function saveStructuredExtraction(status = "needs_review") {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ data: readExtractionForm(), status }),
     });
-    renderExtraction(payload.extraction);
+    renderExtraction(payload.extraction, payload.accounting_review);
+    await Promise.all([loadAccountingQueue(), loadAccountingMatches()]);
     ui.extractionMessage.textContent = status === "approved"
       ? "Structured data approved."
       : "Structured data saved for further review.";

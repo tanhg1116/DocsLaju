@@ -24,6 +24,9 @@ This branch transitions the UI from Streamlit to a custom Flask frontend while p
 - Adaptive OCR scheduling for the 1,250 pages/minute account limit, with bounded concurrency, retry backoff, current-page priority, and optional Mistral micro-batches
 - Workspace-wide OCR text search with direct page navigation and result highlighting
 - Per-page review states for approval and follow-up, including OCR confidence indicators
+- Local accounting review for invoices, receipts, and quotations: provenance,
+  explainable arithmetic and inclusive/exclusive tax checks, duplicate signals,
+  and an exception queue
 - Restart-resilient OCR jobs, failed-page retry, and duplicate-upload detection
 - Template-driven Invoice, Receipt, Quotation, and CV/Résumé extraction with editable fields, tables, approval, and CSV export
 - Markdown/structured workspace switcher that keeps the original document preview visible
@@ -100,6 +103,9 @@ db/
 instance/
 └── docslaju.sqlite3           Runtime database (automatic; Git-ignored)
 src/
+├── accounting/
+│   ├── review.py              Deterministic financial checks and provenance
+│   └── matching.py            Explainable purchasing-document matching
 ├── mistral_client.py          Mistral SDK integration
 └── services/
     ├── browser_pdf.py         Installed-browser PDF rendering
@@ -111,10 +117,12 @@ src/
 templates/index.html           Three-pane application shell
 static/app.css                 Responsive visual design
 static/app.js                  Sidebar, upload, OCR, editor, and export behavior
-static/modules/                Pure browser helpers and Markdown layout rules
+static/modules/                Pure browser helpers, review UI, and Markdown layout rules
 static/vendor/katex/           Local KaTeX renderer, fonts, and license
 tests/                         Unit, persistence, and Flask route tests
 docs/REVIEW_GUIDE.md           Guided architecture and code-review entry point
+docs/ACCOUNTING_ASSISTANT.md   Review-only accounting scope and test scenario
+docs/ROADMAP.md                Completed phases and next accounting increments
 docs/OCR_BENCHMARK.md          Live scheduler measurements and decisions
 ```
 

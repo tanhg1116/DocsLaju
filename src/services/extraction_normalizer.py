@@ -41,7 +41,13 @@ def normalize_template_data(data: object, template: dict) -> dict:
         if value is None:
             return [] if non_null_type == "array" else None
         if non_null_type == "string":
-            return _nullable_text(value, 4000)
+            text = _nullable_text(value, 4000)
+            enum = field_schema.get("enum")
+            if enum and text not in enum:
+                if "unknown" in enum:
+                    return "unknown"
+                raise ValueError("Text value is outside the supported choices")
+            return text
         if non_null_type == "number":
             return _nullable_number(value)
         if non_null_type == "boolean":

@@ -1,0 +1,11 @@
+{
+  "scenario_id": "laju-office-solutions-2026-08",
+  "calculations": [
+    {"id": "furnipro_invoice_total", "formula": "subtotal - discount + tax", "inputs": {"subtotal": 3400.00, "discount": 100.00, "tax": 264.00}, "result": 3564.00},
+    {"id": "furnipro_net_payable", "formula": "invoice total - credit note", "inputs": {"invoice_total": 3564.00, "credit_note": 345.60}, "result": 3218.40},
+    {"id": "employee_claim_supported", "formula": "petrol + parking + hotel + meal receipt + e-hailing", "inputs": {"petrol": 120.00, "parking": 16.50, "hotel": 280.00, "meal_receipt": 45.00, "e_hailing": 25.00}, "result": 486.50},
+    {"id": "employee_claim_difference", "formula": "claim total - supported total", "inputs": {"claim_total": 496.50, "supported_total": 486.50}, "result": 10.00},
+    {"id": "customer_outstanding", "formula": "invoice total - payment received", "inputs": {"invoice_total": 1620.00, "payment_received": 1000.00}, "result": 620.00},
+    {"id": "bad_invoice_expected_total", "formula": "subtotal + tax", "inputs": {"subtotal": 1000.00, "tax": 80.00}, "result": 1080.00, "document_value": 1090.00, "difference": 10.00}
+  ]
+}

@@ -24,6 +24,13 @@ from flask import Flask, Response, jsonify, render_template, request, send_file
 from werkzeug.exceptions import BadRequest, Conflict, NotFound, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
+from src.accounting import (
+    FINANCIAL_PROFILES,
+    MATCH_RELATIONSHIPS,
+    build_accounting_review,
+    build_purchase_match_groups,
+    find_duplicate_candidates,
+)
 from src.mistral_client import (
     MODEL_DEFAULT,
     extract_document_annotation,
@@ -238,19 +245,151 @@ def _optional_template(template_id: object) -> dict | None:
         raise BadRequest("Unknown document type") from exc
 
 
-def _extraction_payload(extraction: dict | None, template: dict) -> dict:
-    return {
+def _accounting_review_payload(
+    extraction: dict,
+    template: dict,
+    session_id: str,
+    document_id: str,
+) -> dict:
+    source_data = _db().get_document_extraction_source(
+        ADMIN_USER_ID, session_id, document_id, template["id"]
+    )
+    pages = _db().list_document_page_evidence(
+        ADMIN_USER_ID, session_id, document_id
+    )
+    candidate_rows = _db().list_accounting_candidate_extractions(
+        ADMIN_USER_ID, document_id, template["id"]
+    )
+    duplicates = find_duplicate_candidates(
+        template["id"], extraction["data"], candidate_rows
+    )
+    return build_accounting_review(
+        template["id"],
+        extraction["data"],
+        source_data=source_data,
+        extraction_status=str(extraction.get("status") or "needs_review"),
+        pages=pages,
+        duplicate_candidates=duplicates,
+    )
+
+
+def _extraction_payload(
+    extraction: dict | None,
+    template: dict,
+    *,
+    session_id: str | None = None,
+    document_id: str | None = None,
+) -> dict:
+    payload = {
         "profile": template["id"],
         "profile_name": template["label"],
         "schema_version": template["schema_version"],
         "layout": template["layout"],
         "extraction": extraction,
     }
+    payload["accounting_review"] = (
+        _accounting_review_payload(extraction, template, session_id, document_id)
+        if extraction and session_id and document_id
+        else None
+    )
+    return payload
 
 
 @app.get("/api/extraction-templates")
 def extraction_templates() -> Response:
     return jsonify({"templates": public_templates()})
+
+
+@app.get("/api/accounting/review-queue")
+def accounting_review_queue() -> Response:
+    """Return explainable exceptions across saved financial extractions."""
+    items: list[dict] = []
+    for extraction in _db().list_accounting_extractions(ADMIN_USER_ID):
+        profile = str(extraction["profile"])
+        if profile not in FINANCIAL_PROFILES:
+            continue
+        template = get_template(profile)
+        review = _accounting_review_payload(
+            extraction,
+            template,
+            str(extraction["session_id"]),
+            str(extraction["document_id"]),
+        )
+        warning_count = int(review["summary"]["warning_count"])
+        if not warning_count and extraction["status"] == "approved":
+            continue
+        items.append({
+            "session_id": extraction["session_id"],
+            "session_title": extraction["session_title"],
+            "document_id": extraction["document_id"],
+            "document_name": extraction["document_name"],
+            "profile": profile,
+            "page_number": 1,
+            "status": extraction["status"],
+            "warning_count": warning_count,
+            "issue_count": review["summary"]["issue_count"],
+            "top_issue": review["issues"][0]["title"] if review["issues"] else "Awaiting approval",
+        })
+    items.sort(key=lambda item: (-item["warning_count"], item["document_name"]))
+    return jsonify({"items": items, "count": len(items)})
+
+
+def _accounting_match_groups() -> list[dict]:
+    return build_purchase_match_groups(
+        _db().list_accounting_extractions(ADMIN_USER_ID),
+        _db().list_accounting_match_decisions(ADMIN_USER_ID),
+    )
+
+
+@app.get("/api/accounting/matches")
+def accounting_matches() -> Response:
+    """Return transparent PO-centred relationship suggestions and decisions."""
+    groups = _accounting_match_groups()
+    return jsonify({"groups": groups, "count": len(groups)})
+
+
+@app.patch("/api/accounting/matches/decision")
+def save_accounting_match_decision() -> Response:
+    payload = request.get_json(silent=True) or {}
+    anchor_id = str(payload.get("anchor_document_id") or "").strip()
+    related_id = str(payload.get("related_document_id") or "").strip()
+    relationship = str(payload.get("relationship_type") or "").strip()
+    decision = str(payload.get("decision") or "").strip()
+    note = str(payload.get("note") or "").strip() or None
+    if relationship not in MATCH_RELATIONSHIPS:
+        raise BadRequest("Unknown accounting relationship")
+    if decision not in {"confirmed", "rejected"}:
+        raise BadRequest("Decision must be confirmed or rejected")
+    if len(note or "") > 500:
+        raise BadRequest("Decision notes are limited to 500 characters")
+
+    expected_profile = {
+        "quotation_to_purchase_order": "quotation",
+        "purchase_order_to_delivery": "delivery_order",
+        "purchase_order_to_invoice": "invoice",
+        "purchase_order_to_credit_note": "credit_note",
+        "purchase_order_to_payment": "payment_confirmation",
+    }[relationship]
+    profiles = {
+        str(item["document_id"]): str(item["profile"])
+        for item in _db().list_accounting_extractions(ADMIN_USER_ID)
+    }
+    if profiles.get(anchor_id) != "purchase_order" or profiles.get(related_id) != expected_profile:
+        raise BadRequest("The selected documents do not match this relationship type")
+    try:
+        saved = _db().save_accounting_match_decision(
+            ADMIN_USER_ID,
+            anchor_id,
+            related_id,
+            relationship,
+            decision,
+            note,
+        )
+    except KeyError as exc:
+        raise NotFound("Accounting match document not found") from exc
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from exc
+    return jsonify({"decision": saved, "groups": _accounting_match_groups()})
 
 
 @app.get("/")
@@ -551,7 +690,9 @@ def get_document_extraction(session_id: str, file_id: str, template_id: str) -> 
         )
     except KeyError as exc:
         raise NotFound("Document not found") from exc
-    return jsonify(_extraction_payload(extraction, template))
+    return jsonify(_extraction_payload(
+        extraction, template, session_id=session_id, document_id=file_id
+    ))
 
 
 @app.post("/api/sessions/<session_id>/files/<file_id>/extractions/<template_id>/run")
@@ -624,7 +765,9 @@ def run_document_extraction(session_id: str, file_id: str, template_id: str) -> 
                 MODEL_DEFAULT,
                 schema_version=template["schema_version"],
             )
-            payload = _extraction_payload(extraction, template)
+            payload = _extraction_payload(
+                extraction, template, session_id=session_id, document_id=file_id
+            )
             payload["ocr_included"] = True
             return jsonify(payload)
 
@@ -680,7 +823,9 @@ def run_document_extraction(session_id: str, file_id: str, template_id: str) -> 
         )
     finally:
         _db().release_document_extraction(file_id, template["id"])
-    payload = _extraction_payload(extraction, template)
+    payload = _extraction_payload(
+        extraction, template, session_id=session_id, document_id=file_id
+    )
     payload["ocr_included"] = ocr_included
     return jsonify(payload)
 
@@ -707,10 +852,13 @@ def update_document_extraction(session_id: str, file_id: str, template_id: str) 
             str(existing["model"]),
             schema_version=template["schema_version"],
             status=status,
+            origin="user",
         )
     except ValueError as exc:
         raise BadRequest(str(exc)) from exc
-    return jsonify(_extraction_payload(extraction, template))
+    return jsonify(_extraction_payload(
+        extraction, template, session_id=session_id, document_id=file_id
+    ))
 
 
 @app.get("/api/sessions/<session_id>/files/<file_id>/extractions/<template_id>.csv")

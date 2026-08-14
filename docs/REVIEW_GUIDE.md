@@ -39,12 +39,20 @@ Flask or JavaScript entry points:
    [`markdown_renderer.py`](../src/services/markdown_renderer.py), and
    [`extraction_normalizer.py`](../src/services/extraction_normalizer.py) —
    pure document transformation and validation boundaries.
-8. [`app.py`](../app.py) — HTTP routes and service composition.
-9. [`static/modules/`](../static/modules/) — pure browser helpers and rendered
-   Markdown layout rules.
-10. [`static/app.js`](../static/app.js) — browser state, polling, and user
+8. [`src/accounting/review.py`](../src/accounting/review.py) — deterministic,
+   review-only financial checks, provenance, and duplicate scoring.
+9. [`src/accounting/matching.py`](../src/accounting/matching.py) — explainable,
+   PO-centred purchasing and settlement suggestions, quantity comparisons, net
+   payable, and outstanding balance.
+10. [`src/services/image_preprocessor.py`](../src/services/image_preprocessor.py)
+   and [`browser_pdf.py`](../src/services/browser_pdf.py) — conditional image
+   cleanup and browser-backed PDF export.
+11. [`app.py`](../app.py) — HTTP routes and service composition.
+12. [`static/modules/`](../static/modules/) — pure browser helpers and rendered
+    Markdown layout rules.
+13. [`static/app.js`](../static/app.js) — browser state, polling, and user
    interactions.
-11. [`tests/`](../tests) — executable examples of expected behavior.
+14. [`tests/`](../tests) — executable examples of expected behavior.
 
 The entry points retain route and browser orchestration while reusable pure
 logic lives in focused modules. Keep new transformation rules out of `app.py`
@@ -71,6 +79,45 @@ Flask routes (app.py)
 `app.py` composes the system. Business rules that require durable state belong
 in `Database`; scheduling rules belong in `OcrJobManager`; Mistral request and
 response translation belongs in `mistral_client.py`.
+
+### Extracted module boundaries
+
+The entry points are still intentionally substantial because they coordinate
+many HTTP routes and browser controls. Reusable transformation logic has been
+extracted along these boundaries:
+
+| Module | Responsibility |
+| --- | --- |
+| `src/services/document_ocr.py` | Upload validation, PDF rasterization, OCR image decoding, and asset-link preparation |
+| `src/services/extraction_normalizer.py` | Validation and normalization of structured template data |
+| `src/services/markdown_renderer.py` | Safe Markdown compilation and owned-asset URL rewriting |
+| `src/services/image_preprocessor.py` | Conditional crop, deskew, resize, and contrast decisions for image OCR input |
+| `static/modules/auto-ocr-range.js` | Auto-OCR page-range parsing |
+| `static/modules/extraction-utils.js` | Structured-template search and value conversion |
+| `static/modules/markdown-layout.js` | KaTeX rendering plus non-destructive visual list/equation layout |
+| `static/modules/ui-icons.js` | Shared SVG icon markup and accessible icon-button state |
+| `static/modules/accounting-review.js` | DOM rendering for provenance, calculation cards, exceptions, and the review queue |
+| `src/accounting/review.py` | Review-only field provenance, arithmetic checks, source-page evidence, and duplicate signals |
+| `src/accounting/matching.py` | PO-centred relationship scoring, quantity/value comparisons, credit application, and payment balance |
+
+Keep orchestration in the entry points, but extract new deterministic business
+rules or reusable DOM-independent transformations into focused modules.
+
+Tax reconciliation is intentionally multi-signal. Review `tax_treatment`, its
+verbatim `tax_evidence`, the matching OCR page, and both arithmetic candidates
+together. Never replace this with an unconditional `subtotal + tax` rule or
+trust annotation evidence that cannot be found in saved OCR Markdown.
+`tax_treatment` describes the document's price/total convention, while
+`subtotal_basis` describes whether the extracted subtotal is net or gross. They
+must remain separate because providers can validly return either representation.
+`accounting_review.suggested_fields` may fill missing form values for display,
+but it must never mutate `document_extractions` outside the existing explicit
+Save/Approve route.
+Purchasing bundles may contain multiple deliveries or invoices. Review
+`bundle`, `checks`, and `issues` together: quantities are accumulated per
+matched PO line, monetary comparison uses a 0.02 tolerance, and a currency
+conflict must leave the total comparison unresolved rather than converted or
+summed.
 
 ## Main workflow: upload and OCR
 
@@ -175,6 +222,10 @@ Verify these invariants when changing OCR behavior:
 - Structured extraction failure does not invalidate Markdown.
 - The original document and the temporary optimized OCR input are distinct.
 - Temporary Mistral file uploads are deleted in `finally` blocks.
+- Accounting checks never rewrite OCR Markdown or structured values.
+- A source page is reported only when evidence matching is unique; document-level
+  provenance is preferable to a guessed location.
+- Calculated, extracted, user-edited, and approved states remain distinguishable.
 
 ## Frontend review map
 
@@ -183,15 +234,17 @@ through the file:
 
 | Feature | Search for |
 | --- | --- |
-| State loading and rendering | `loadState`, `renderState` |
+| State loading and rendering | `refresh`, `renderState` |
 | Auto-OCR status | `updateBatchControls`, `pollOcrJob` |
 | Auto-OCR start/stop | `runAllOcr`, `cancelAllOcr` |
 | Current-page priority | `runOcr` |
-| PDF preview | `loadPdfPreview`, `renderPdfPage` |
+| PDF/image preview | `loadPreview`, `loadPdfPreview`, `loadRasterPreview` |
 | Markdown editing | `saveMarkdown`, `savePendingMarkdown` |
-| Structured workspace | `renderStructuredWorkspace` |
+| Structured workspace | `renderExtraction`, `renderExtractionLayout`, `setWorkspaceView` |
+| Accounting assistance | `renderAccountingReview`, `revealAccountingEvidence`, `loadAccountingQueue` |
 | Upload and clipboard paste | `uploadFiles`, `readClipboardImage` |
-| Export | `openExportDialog`, `runExport` |
+| Export | `openExportDialog`, `downloadExport` |
+| Sidebar and pane sizing | `setSidebarCollapsed`, `resizeWorkspacePane` |
 
 The browser treats the Flask state response as the current durable state. It
 may optimistically update controls, but persisted OCR/page state comes back from
@@ -201,13 +254,21 @@ the API during polling.
 
 | Table | Responsibility |
 | --- | --- |
+| `users` | Local workspace owner; currently the seeded admin user |
+| `projects` | Optional folders used to organize sessions |
+| `sessions` | Named, pinnable, archivable document workspaces |
 | `documents` | Original upload, MIME, page count, checksum, selected type |
 | `document_pages` | Source/editable Markdown, confidence, review state |
 | `document_assets` | OCR-extracted images referenced by short Markdown paths |
-| `document_extractions` | Versioned structured template results |
+| `document_extractions` | Current editable structured template result |
+| `document_extraction_revisions` | Immutable model/user snapshots used for provenance |
+| `document_extraction_claims` | Duplicate structured-extraction lock |
+| `accounting_match_decisions` | Explicit reviewer decisions over deterministic purchasing-chain suggestions |
 | `ocr_jobs` | Document-level automatic OCR lifecycle and scheduler metadata |
 | `ocr_job_pages` | Page priority, attempts, mode, result/error timing |
 | `ocr_page_claims` | Cross-request duplicate-inference lock |
+| `ocr_scheduler_metrics` | Persisted real-time/Batch throughput calibration |
+| `user_preferences` | Durable theme and workspace presentation preferences |
 | `schema_migrations` | Applied forward database migrations |
 
 The `/api/state` path deliberately selects document metadata rather than BLOB
@@ -242,6 +303,11 @@ High-value tests are:
 - adaptive concurrency response to `429`;
 - out-of-order Batch result mapping;
 - partial structured-extraction failure preserving successful pages.
+- deterministic calculation/provenance checks and duplicate explanations;
+- completeness of the single-company accounting acceptance scenario.
+
+The coherent manual acceptance pack and reviewer steps live in
+[`tests/scenarios/laju_office_solutions/`](../tests/scenarios/laju_office_solutions/README.md).
 
 ## Deferred production work
 

@@ -32,8 +32,8 @@ def test_schema_contains_the_persistent_repository(isolated_database: Path):
         "users", "projects", "sessions", "documents", "document_pages", "user_preferences",
         "document_assets", "ocr_jobs", "ocr_job_pages", "ocr_page_claims",
         "document_pages_fts",
-        "document_extractions", "document_extraction_claims",
-        "ocr_scheduler_metrics",
+        "document_extractions", "document_extraction_revisions", "document_extraction_claims",
+        "accounting_match_decisions", "ocr_scheduler_metrics",
     }
     with sqlite3.connect(isolated_database) as connection:
         tables = {
@@ -134,14 +134,27 @@ def test_extraction_template_catalog_is_versioned_and_layout_driven():
 
     assert response.status_code == 200
     templates = {item["id"]: item for item in response.get_json()["templates"]}
-    assert set(templates) == {"invoice", "receipt", "quotation", "resume"}
-    assert templates["invoice"]["schema_version"] == 1
-    assert templates["receipt"]["schema_version"] == 1
-    assert templates["quotation"]["schema_version"] == 1
+    assert set(templates) == {
+        "invoice", "receipt", "quotation", "purchase_order", "delivery_order",
+        "credit_note", "payment_confirmation", "resume"
+    }
+    assert templates["invoice"]["schema_version"] == 4
+    assert templates["receipt"]["schema_version"] == 2
+    assert templates["quotation"]["schema_version"] == 2
     assert templates["resume"]["schema_version"] == 2
     assert templates["invoice"]["layout"]["tables"][0]["key"] == "line_items"
     assert templates["receipt"]["layout"]["tables"][0]["key"] == "purchased_items"
     assert templates["quotation"]["layout"]["tables"][0]["key"] == "quoted_items"
+    assert templates["purchase_order"]["layout"]["tables"][0]["key"] == "line_items"
+    assert templates["delivery_order"]["layout"]["tables"][0]["key"] == "delivered_items"
+    assert templates["credit_note"]["layout"]["tables"][0]["key"] == "line_items"
+    assert templates["payment_confirmation"]["layout"]["tables"] == []
+    receipt_totals = templates["receipt"]["layout"]["sections"][1]["fields"]
+    tax_treatment = next(field for field in receipt_totals if field["key"] == "tax_treatment")
+    assert tax_treatment["type"] == "choice"
+    assert {option["value"] for option in tax_treatment["options"]} == {
+        "inclusive", "exclusive", "not_applicable", "unknown"
+    }
     assert {table["key"] for table in templates["resume"]["layout"]["tables"]} >= {
         "experience", "education", "projects", "certifications", "achievements"
     }
@@ -178,6 +191,7 @@ def test_quotation_template_normalizes_commercial_terms_and_items():
             "quotation_number": "Q-1042",
             "valid_until": "2026-09-30",
             "payment_terms": "50% deposit",
+            "tax_treatment": "made-up treatment",
             "quoted_items": [{
                 "item_code": "SKU-1",
                 "description": "Installation service",
@@ -196,6 +210,7 @@ def test_quotation_template_normalizes_commercial_terms_and_items():
     assert normalized["document_type"] == "quotation"
     assert normalized["quotation_number"] == "Q-1042"
     assert normalized["payment_terms"] == "50% deposit"
+    assert normalized["tax_treatment"] == "unknown"
     assert normalized["quoted_items"][0]["item_code"] == "SKU-1"
     assert normalized["quoted_items"][0]["amount"] == 216.0
 
@@ -560,6 +575,7 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         script = client.get("/static/app.js")
         icon_script = client.get("/static/modules/ui-icons.js")
         extraction_script = client.get("/static/modules/extraction-utils.js")
+        accounting_script = client.get("/static/modules/accounting-review.js")
         markdown_script = client.get("/static/modules/markdown-layout.js")
         css = client.get("/static/app.css")
 
@@ -597,6 +613,9 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         assert b'id="icon-sun"' in page.data
         assert b"function renderExtractionTemplateOptions" in script.data
         assert b"function normalizedTemplateSearch" in extraction_script.data
+        assert b"function renderAccountingReview" in accounting_script.data
+        assert b"accountingReview?.suggested_fields" in script.data
+        assert b'provenance.kind === "derived"' in accounting_script.data
         assert b'ui.extractionProfile.addEventListener("input"' in script.data
         assert b"control.readOnly = !extractionEditMode" in script.data
         assert b'editExtractionButton.addEventListener("click"' in script.data

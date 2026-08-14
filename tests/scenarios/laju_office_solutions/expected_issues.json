@@ -1,0 +1,16 @@
+{
+  "scenario_id": "laju-office-solutions-2026-08",
+  "issues": [
+    {"code": "delivery_quantity_mismatch", "documents": ["02_purchase_order_PO-2026-044.pdf", "03_delivery_order_DO-2026-118.jpg"], "expected": "Ordered 10 chairs; delivered 9"},
+    {"code": "credit_note_unapplied", "documents": ["04_supplier_invoice_INV-FP-338.pdf", "05_credit_note_CN-FP-019.pdf"], "expected": "Net payable is MYR 3,218.40"},
+    {"code": "claim_receipt_mismatch", "documents": ["10_employee_claim_EC-2026-08-014.pdf", "16_receipt_meal_R-MEAL-551.jpg"], "expected": "Claim exceeds receipt by MYR 10.00"},
+    {"code": "exact_duplicate", "documents": ["12_receipt_parking_R-PARK-229.png", "13_receipt_parking_exact_duplicate.png"], "expected": "Exact checksum duplicate"},
+    {"code": "visual_duplicate", "documents": ["12_receipt_parking_R-PARK-229.png", "14_receipt_parking_recompressed.jpg"], "expected": "Visually similar receipt with same reference, date and total"},
+    {"code": "partial_payment", "documents": ["21_customer_invoice_INV-C-204.pdf", "22_customer_payment_advice_PA-C-88.pdf"], "expected": "Outstanding receivable is MYR 620.00"},
+    {"code": "amount_anomaly", "documents": ["30_electricity_may_2026.pdf", "31_electricity_june_2026.pdf", "32_electricity_july_2026.pdf", "33_electricity_august_anomaly.pdf"], "expected": "August amount is far above the three-month baseline"},
+    {"code": "foreign_currency_rate_missing", "documents": ["35_software_subscription_USD.pdf"], "expected": "Request rate date and source before MYR conversion"},
+    {"code": "total_mismatch", "documents": ["40_bad_arithmetic_invoice_INV-MISC-778.pdf"], "expected": "MYR 1,000.00 + MYR 80.00 = MYR 1,080.00, not MYR 1,090.00"},
+    {"code": "missing_field", "documents": ["41_missing_reference_invoice.pdf"], "expected": "Invoice number is absent; do not invent one"},
+    {"code": "invalid_upload", "documents": ["42_damaged_supplier_attachment.pdf"], "expected": "Malformed PDF rejected without affecting other documents"}
+  ]
+}
