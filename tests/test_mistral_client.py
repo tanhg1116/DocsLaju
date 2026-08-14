@@ -1,3 +1,5 @@
+import io
+import json
 from types import SimpleNamespace
 
 from src import mistral_client
@@ -18,11 +20,38 @@ class FakeOcr:
 
 
 class FakeFiles:
-    def upload(self, **_kwargs):
+    def __init__(self, downloads=None):
+        self.downloads = downloads or {}
+        self.deleted = []
+        self.uploads = []
+
+    def upload(self, **kwargs):
+        self.uploads.append(kwargs)
         return SimpleNamespace(id="file-1")
 
     def get_signed_url(self, **_kwargs):
         return SimpleNamespace(url="https://example.invalid/document.pdf")
+
+    def download(self, *, file_id):
+        return io.BytesIO(self.downloads[file_id])
+
+    def delete(self, *, file_id):
+        self.deleted.append(file_id)
+
+
+class FakeBatchJobs:
+    def __init__(self, output_file="batch-output"):
+        self.output_file = output_file
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            id="batch-job-1",
+            status="SUCCESS",
+            output_file=self.output_file,
+            error_file=None,
+        )
 
 
 def test_pdf_ocr_requests_markdown_without_layout_blocks(monkeypatch):
@@ -148,3 +177,41 @@ def test_combined_ocr_returns_markdown_and_annotation_from_one_request(monkeypat
     call = fake.ocr.calls[0]
     assert call["include_image_base64"] is True
     assert call["document_annotation_format"]["type"] == "json_schema"
+
+
+def test_image_batch_maps_out_of_order_results_and_cleans_remote_output(monkeypatch):
+    output = "\n".join([
+        json.dumps({
+            "custom_id": "2",
+            "response": {
+                "status_code": 200,
+                "body": {"pages": [{"markdown": "# Page 2", "images": []}]},
+            },
+        }),
+        json.dumps({
+            "custom_id": "1",
+            "response": {
+                "status_code": 200,
+                "body": {"pages": [{"markdown": "# Page 1", "images": []}]},
+            },
+        }),
+    ]).encode()
+    files = FakeFiles({"batch-output": output})
+    jobs = FakeBatchJobs()
+    fake = SimpleNamespace(files=files, batch=SimpleNamespace(jobs=jobs))
+    monkeypatch.setattr(mistral_client, "get_client", lambda: fake)
+
+    result = mistral_client.ocr_images_batch({
+        "1": (b"first", "image/png"),
+        "2": (b"second", "image/png"),
+    })
+
+    assert result.pages["1"].markdown == "# Page 1"
+    assert result.pages["2"].markdown == "# Page 2"
+    assert result.remote_job_id == "batch-job-1"
+    assert files.deleted == ["batch-output", "file-1"]
+    assert jobs.calls[0]["endpoint"] == "/v1/ocr"
+    assert jobs.calls[0]["input_files"] == ["file-1"]
+    assert files.uploads[0]["purpose"] == "batch"
+    uploaded_lines = files.uploads[0]["file"]["content"].decode().splitlines()
+    assert [json.loads(line)["custom_id"] for line in uploaded_lines] == ["1", "2"]

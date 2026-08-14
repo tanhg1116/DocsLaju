@@ -8,7 +8,10 @@ the app can persist user-owned sessions before authentication is introduced.
 ```text
 db/
 ├── README.md                  Database layout and ownership notes
-└── schema.sql                 Tables, constraints, indexes, and admin seed
+├── schema.sql                 Tables, constraints, indexes, and admin seed
+└── migrations/
+    ├── 001_ocr_scheduler_indexes.sql
+    └── 002_scheduler_metrics.sql
 src/services/
 └── database.py               SQLite repository used by Flask routes
 instance/
@@ -57,7 +60,10 @@ users
   holds the editable version with short asset references.
 - `document_pages.preprocessing_json` records the conditional local image
   enhancements used for OCR. The original document bytes remain in `documents`.
-- Batch progress is stored in `ocr_jobs` and `ocr_job_pages`. A page whose HTTP
+- Automatic OCR progress is stored in `ocr_jobs` and `ocr_job_pages`. Jobs retain
+  their selected real-time/Batch mode, document checksum and configured rate
+  ceiling. Pages retain attempts, error category, duration, processing mode and
+  remote Batch id. A page whose HTTP
   request was interrupted is returned to the queue when Flask restarts; completed
   pages remain completed, and cancelled jobs remain cancelled.
 - Every job page has a numeric priority. The worker atomically dequeues by
@@ -66,6 +72,11 @@ users
 - `ocr_page_claims` has a `(document_id, page_number)` primary key. Manual and
   batch OCR must acquire it atomically before calling Mistral, preventing duplicate
   inference for the same page.
+- `ocr_scheduler_metrics` stores rolling real-time latency and throughput,
+  Batch duration, learned concurrency, sample counts, and 429 events. Its one
+  local-account row survives Flask restarts and is configuration-aware.
+- `schema_migrations` records each checked-in SQL migration after it is applied,
+  allowing future schema changes to run once without replacing local data.
 - `documents.checksum` stores a SHA-256 digest used to avoid duplicate uploads
   within one session.
 - Deleting a session cascades to its documents and page results.

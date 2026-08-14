@@ -21,6 +21,7 @@ This branch transitions the UI from Streamlit to a custom Flask frontend while p
   returns Markdown and structured fields together in one Mistral request
 - Drag-and-drop PDF/image upload directly onto the preview pane
 - Non-blocking automatic OCR toggle with a configurable page range, progress, and immediate queue cancellation
+- Adaptive OCR scheduling for the 1,250 pages/minute account limit, with bounded concurrency, retry backoff, current-page priority, and optional Mistral micro-batches
 - Workspace-wide OCR text search with direct page navigation and result highlighting
 - Per-page review states for approval and follow-up, including OCR confidence indicators
 - Restart-resilient OCR jobs, failed-page retry, and duplicate-upload detection
@@ -34,6 +35,18 @@ This branch transitions the UI from Streamlit to a custom Flask frontend while p
 The local draft runs as a seeded admin user without a login screen. Its sessions,
 projects, uploaded files, active selection, and page-level OCR results persist in
 `instance/docslaju.sqlite3`, so restarting Flask does not clear the workspace.
+
+## Reviewing the code
+
+New contributors should begin with
+[`docs/REVIEW_GUIDE.md`](docs/REVIEW_GUIDE.md). It provides the recommended
+reading order, architecture and request flows, concurrency/cost invariants,
+frontend and database navigation maps, and the review checklist for OCR changes.
+The entry points now delegate pure document, Markdown, extraction, and browser
+layout helpers to focused modules; the guide explains those boundaries.
+
+Live scheduler measurements and their reproducible commands are recorded in
+[`docs/OCR_BENCHMARK.md`](docs/OCR_BENCHMARK.md).
 
 ## Setup
 
@@ -82,7 +95,8 @@ The route tests do not call Mistral. Live OCR requires a valid `MISTRAL_API_KEY`
 app.py                         Flask application and JSON API
 db/
 ├── README.md                  Database structure and ownership notes
-└── schema.sql                 SQLite tables, constraints, indexes, and seed
+├── schema.sql                 SQLite tables, constraints, indexes, and seed
+└── migrations/               Versioned forward database migrations
 instance/
 └── docslaju.sqlite3           Runtime database (automatic; Git-ignored)
 src/
@@ -90,12 +104,18 @@ src/
 └── services/
     ├── browser_pdf.py         Installed-browser PDF rendering
     ├── database.py            SQLite repository and full-text search
+    ├── document_ocr.py         PDF rasterization and OCR asset preparation
+    ├── extraction_normalizer.py Structured result validation
+    ├── markdown_renderer.py    Safe server-side Markdown compilation
     └── ocr_jobs.py            Persistent prioritized OCR worker
 templates/index.html           Three-pane application shell
 static/app.css                 Responsive visual design
 static/app.js                  Sidebar, upload, OCR, editor, and export behavior
+static/modules/                Pure browser helpers and Markdown layout rules
 static/vendor/katex/           Local KaTeX renderer, fonts, and license
 tests/                         Unit, persistence, and Flask route tests
+docs/REVIEW_GUIDE.md           Guided architecture and code-review entry point
+docs/OCR_BENCHMARK.md          Live scheduler measurements and decisions
 ```
 
 The complete database repository tree and relationship diagram are in
@@ -106,6 +126,7 @@ The complete database repository tree and relationship diagram are in
 
 - Supported inputs: PDF, PNG, JPG/JPEG, and WEBP (30 MB maximum in this draft).
 - PDFs are loaded directly from Flask into the browser's built-in PDF viewer; the app does not rasterize PDF previews or synthesize a text layer.
+- PDF OCR is deliberately different from previewing: each page is rasterized locally into a clean image before submission so malformed or unsupported PDF internals cannot break the Mistral request. The original PDF remains unchanged.
 - Only text selectable in the original PDF is selectable in the preview. Scanned/image-only PDFs and uploaded images remain non-selectable even after OCR.
 - HTML typed into the Markdown editor is escaped before rendering.
 - KaTeX is bundled in `static/vendor/katex`, so math rendering does not require a CDN or npm at runtime.
@@ -130,8 +151,14 @@ The complete database repository tree and relationship diagram are in
   next.
 - SQLite page claims prevent manual and batch requests from processing the same
   document page concurrently.
-- Active OCR queues resume after a Flask restart. Failed or cancelled pages can
-  be retried without reprocessing pages that already completed.
+- Active OCR queues resume after a Flask restart. Each page result and its job
+  completion state are committed atomically. Failed or cancelled pages can be
+  retried without reprocessing pages that already completed. Transient server
+  and network failures receive bounded exponential-backoff retries.
+- The scheduler starts conservatively, increases concurrency only after stable
+  success, and halves it after a `429`. Normal documents use the lower-latency
+  real-time endpoint. Mistral Batch is selected only after a forced calibration
+  has saved end-to-end measurements proving it faster for the local workload.
 - Uploads are hashed with SHA-256; selecting the same file twice in one session
   reopens the stored document instead of duplicating it or paying for OCR again.
 - Image uploads are inspected locally before OCR. Orientation correction,
@@ -141,12 +168,12 @@ The complete database repository tree and relationship diagram are in
   reports every action applied to the temporary OCR input.
 - Deleting a document cascades to all of its extracted asset rows.
 - Structured extraction is opened from the green button in the document header.
-  Choose the versioned Invoice, Receipt, Quotation, or CV/Résumé template. On a new document
-  (up to eight pages), one Mistral OCR request returns both page Markdown and
-  schema-validated structured data. The reusable UI renders fields and tables
-  from the trusted template layout; missing scalar values stay `null` in SQLite
-  and appear as `–`. If OCR Markdown already exists, a fallback extraction
-  request preserves it exactly. Re-running replaces only that template's data.
+  Choose the versioned Invoice, Receipt, Quotation, or CV/Résumé template. A
+  single uploaded image keeps the efficient one-call OCR-and-annotation path.
+  Multi-page PDFs first preserve page OCR independently, then annotate a clean
+  raster-only PDF. Annotation failure never removes successful Markdown. The
+  reusable UI renders fields and tables from the trusted template layout;
+  missing scalar values stay `null` in SQLite and appear as `–`.
 - The existing OpenAI dependency is retained for future restoration of AI-generated filenames, but it is not used by this Flask draft.
 
 ## License

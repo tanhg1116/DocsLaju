@@ -1,5 +1,27 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- One durable aggregate for the local Mistral account. This lets the adaptive
+-- scheduler resume from measured performance instead of relearning it after
+-- every Flask restart.
+CREATE TABLE IF NOT EXISTS ocr_scheduler_metrics (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    pages_per_minute_limit INTEGER NOT NULL,
+    target_utilization REAL NOT NULL,
+    current_concurrency INTEGER NOT NULL,
+    realtime_latency_ewma REAL,
+    realtime_throughput_pps REAL,
+    realtime_samples INTEGER NOT NULL DEFAULT 0,
+    batch_seconds_per_page REAL,
+    batch_samples INTEGER NOT NULL DEFAULT 0,
+    rate_limit_events INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
@@ -144,6 +166,10 @@ CREATE TABLE IF NOT EXISTS ocr_jobs (
         CHECK (status IN ('queued', 'running', 'cancelling', 'cancelled', 'completed', 'failed', 'interrupted')),
     force_reprocess INTEGER NOT NULL DEFAULT 0 CHECK (force_reprocess IN (0, 1)),
     cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+    processing_mode TEXT NOT NULL DEFAULT 'adaptive'
+        CHECK (processing_mode IN ('adaptive', 'realtime', 'batch')),
+    document_checksum TEXT,
+    rate_limit_ppm INTEGER NOT NULL DEFAULT 1250,
     error TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     started_at TEXT,
@@ -159,6 +185,11 @@ CREATE TABLE IF NOT EXISTS ocr_job_pages (
     priority INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'queued'
         CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    processing_mode TEXT,
+    remote_batch_id TEXT,
+    error_code TEXT,
+    duration_ms INTEGER,
     error TEXT,
     started_at TEXT,
     finished_at TEXT,

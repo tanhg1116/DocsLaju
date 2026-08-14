@@ -11,7 +11,15 @@ from src.services.ocr_jobs import OcrJobManager
 def isolated_database(tmp_path: Path):
     """Give every test a clean SQLite database without touching local app data."""
     database_path = tmp_path / "docslaju-test.sqlite3"
-    app.config.update(TESTING=True, DATABASE=str(database_path))
+    app.config.update(
+        TESTING=True,
+        DATABASE=str(database_path),
+        VALIDATE_UPLOAD_CONTENT=False,
+    )
     app.extensions["database"] = Database(database_path, Path(app.root_path) / "db" / "schema.sql")
-    app.extensions["ocr_jobs"] = OcrJobManager()
+    app.extensions["ocr_jobs"] = OcrJobManager(
+        initial_concurrency=1,
+        max_concurrency=1,
+        batch_enabled=False,
+    )
     yield database_path

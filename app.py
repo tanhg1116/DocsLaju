@@ -1,13 +1,16 @@
+"""Flask composition root and HTTP API for the local DocsLaju workspace.
+
+Routes validate user input and coordinate services. Durable data rules belong in
+Database, queue/rate rules in OcrJobManager, and provider translation in
+src.mistral_client. Start a review with docs/REVIEW_GUIDE.md rather than reading
+this file linearly.
+"""
+
 from __future__ import annotations
 
-import base64
-import binascii
 import csv
-import html
 import io
 import json
-import math
-import mimetypes
 import os
 import re
 import secrets
@@ -16,7 +19,6 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
-import markdown
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request, send_file
 from werkzeug.exceptions import BadRequest, Conflict, NotFound, RequestEntityTooLarge
@@ -24,13 +26,10 @@ from werkzeug.utils import secure_filename
 
 from src.mistral_client import (
     MODEL_DEFAULT,
-    OcrMarkdown,
-    OcrPageResult,
-    _fix_markdown_line_breaks,
     extract_document_annotation,
     ocr_document_with_annotation,
+    ocr_images_batch,
     ocr_image_with_assets,
-    ocr_pdf_pages_with_assets,
 )
 from src.extraction_templates import (
     DOCUMENT_ANNOTATION_PAGE_LIMIT,
@@ -41,18 +40,23 @@ from src.services.database import ADMIN_USER_ID, Database
 from src.services.browser_pdf import BrowserPdfError, render_url_to_pdf
 from src.services.ocr_jobs import OcrJobManager
 from src.services.image_preprocessor import PreprocessedImage, preprocess_image
+from src.services.document_ocr import (
+    page_count as _page_count,
+    pdf_page_image_for_ocr as _pdf_page_image_for_ocr,
+    prepare_ocr_markdown as _prepare_ocr_markdown,
+    rasterized_pdf_for_annotation as _rasterized_pdf_for_annotation,
+    validated_upload_type as _validated_upload_type,
+)
+from src.services.extraction_normalizer import (
+    normalize_template_data as _normalize_template_data,
+)
+from src.services.markdown_renderer import compile_markdown as _compile_markdown
 
 
 BASE_DIR = Path(__file__).resolve().parent
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024
 APP_PORT = int(os.getenv("PORT", "5000"))
-MATH_EXPRESSION_RE = re.compile(
-    r"\$\$.*?\$\$|\\\[.*?\\\]|\\\(.*?\\\)|"
-    r"(?<!\$)\$(?![\s$])[^\n$]*?(?<!\s)\$(?![\d$])",
-    re.DOTALL,
-)
-ASSET_REFERENCE_RE = re.compile(r"(!\[[^\]]*\]\()assets/([^\s)]+)(\))")
 load_dotenv(override=False)
 app = Flask(__name__)
 app.config.update(
@@ -62,9 +66,11 @@ app.config.update(
     INTERNAL_BASE_URL=(
         os.getenv("DOCSLAJU_INTERNAL_BASE_URL") or f"http://127.0.0.1:{APP_PORT}"
     ).rstrip("/"),
+    VALIDATE_UPLOAD_CONTENT=os.getenv("DOCSLAJU_VALIDATE_UPLOADS", "true").lower()
+    not in {"0", "false", "no", "off"},
 )
 app.extensions["database"] = Database(app.config["DATABASE"], BASE_DIR / "db" / "schema.sql")
-app.extensions["ocr_jobs"] = OcrJobManager()
+app.extensions["ocr_jobs"] = OcrJobManager(database=app.extensions["database"])
 
 
 def _db() -> Database:
@@ -75,44 +81,10 @@ def _job_manager() -> OcrJobManager:
     return app.extensions["ocr_jobs"]
 
 
-def _compile_markdown(source: str, asset_urls: dict[str, str] | None = None) -> str:
-    """Compile Markdown without allowing it to consume LaTeX control characters."""
-    math_expressions: list[tuple[str, str]] = []
-    placeholder_prefix = f"DOCSLAJUMATH{secrets.token_hex(12).upper()}"
-
-    def stash_math(match: re.Match[str]) -> str:
-        placeholder = f"{placeholder_prefix}{len(math_expressions)}END"
-        expression = match.group(0)
-        # Single-dollar math is ambiguous with currency. Only expressions that
-        # passed the boundary rules above reach here, and the conversion exists
-        # solely in rendered HTML; the stored OCR Markdown remains untouched.
-        if expression.startswith("$") and not expression.startswith("$$"):
-            expression = rf"\({expression[1:-1]}\)"
-        math_expressions.append((placeholder, expression))
-        return placeholder
-
-    if asset_urls:
-        source = ASSET_REFERENCE_RE.sub(
-            lambda match: (
-                f"{match.group(1)}{asset_urls.get(match.group(2), match.group(0))}{match.group(3)}"
-                if match.group(2) in asset_urls
-                else match.group(0)
-            ),
-            source,
-        )
-    protected_source = MATH_EXPRESSION_RE.sub(stash_math, source)
-    safe_source = html.escape(protected_source, quote=False)
-    rendered = markdown.markdown(
-        safe_source,
-        extensions=["tables", "fenced_code", "sane_lists"],
-    )
-    for placeholder, expression in math_expressions:
-        rendered = rendered.replace(placeholder, html.escape(expression, quote=False))
-    return rendered
-
-
 def _state() -> dict:
-    return _db().state(ADMIN_USER_ID, MODEL_DEFAULT)
+    payload = _db().state(ADMIN_USER_ID, MODEL_DEFAULT)
+    payload["ocr_scheduler"] = _job_manager().scheduler_status()
+    return payload
 
 
 def _session(session_id: str) -> dict:
@@ -135,6 +107,7 @@ def _document_asset_urls(session_id: str, document_id: str) -> dict[str, str]:
             ADMIN_USER_ID,
             session_id,
             document_id,
+            include_content=False,
         )
     except KeyError as exc:
         raise NotFound("Document not found") from exc
@@ -147,136 +120,36 @@ def _document_asset_urls(session_id: str, document_id: str) -> dict[str, str]:
     }
 
 
-def _page_count(content: bytes, is_pdf: bool) -> int:
-    if not is_pdf:
-        return 1
-    try:
-        import fitz
+def _annotation_document(document: dict) -> tuple[bytes, bool, str]:
+    """Return a provider-safe annotation input without changing stored content.
 
-        with fitz.open(stream=content, filetype="pdf") as pdf:
-            return max(1, len(pdf))
-    except Exception:
-        try:
-            import PyPDF2
-
-            return max(1, len(PyPDF2.PdfReader(io.BytesIO(content)).pages))
-        except Exception as exc:
-            raise BadRequest(f"Could not read this PDF: {exc}") from exc
-
-
-def _single_pdf_page(content: bytes, page_number: int) -> bytes:
-    import PyPDF2
-
-    reader = PyPDF2.PdfReader(io.BytesIO(content))
-    writer = PyPDF2.PdfWriter()
-    writer.add_page(reader.pages[page_number - 1])
-    output = io.BytesIO()
-    writer.write(output)
-    return output.getvalue()
-
-
-def _decode_ocr_image(data_url: str, source_ref: str) -> tuple[str, bytes, str]:
-    mime_type = mimetypes.guess_type(source_ref)[0] or "image/jpeg"
-    encoded = data_url
-    if data_url.startswith("data:"):
-        header, separator, encoded = data_url.partition(",")
-        if not separator or ";base64" not in header:
-            raise ValueError("Unsupported OCR image encoding")
-        mime_type = header[5:].split(";", 1)[0].lower()
-    if not mime_type.startswith("image/"):
-        raise ValueError("OCR object is not an image")
-    try:
-        content = base64.b64decode(re.sub(r"\s+", "", encoded), validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise ValueError("OCR returned invalid image data") from exc
-    extension = {
-        "image/jpeg": "jpg",
-        "image/svg+xml": "svg",
-        "image/x-icon": "ico",
-    }.get(mime_type, mimetypes.guess_extension(mime_type, strict=False) or ".bin").lstrip(".")
-    return mime_type, content, extension
-
-
-def _prepare_ocr_markdown(
-    document: dict,
-    page_number: int,
-    page: OcrPageResult,
-    preprocessing_report: dict | None = None,
-) -> OcrMarkdown:
-    source_markdown = page.markdown
-    editable_markdown = source_markdown
-    document_stem = secure_filename(Path(document["name"]).stem) or "document"
-    assets: list[dict] = []
-    for index, image in enumerate(page.images, start=1):
-        mime_type, content, extension = _decode_ocr_image(image.data_url, image.source_ref)
-        filename = f"{document_stem}-{page_number}-image-{index}.{extension}"
-        editable_markdown = editable_markdown.replace(
-            f"]({image.source_ref})",
-            f"](assets/{filename})",
-        )
-        assets.append({
-            "source_ref": image.source_ref,
-            "object_type": "image",
-            "filename": filename,
-            "mime_type": mime_type,
-            "content": content,
-        })
-    editable_markdown = _fix_markdown_line_breaks(
-        editable_markdown,
-        parse_structured_md=True,
-    )
-    return OcrMarkdown(
-        editable_markdown,
-        source_markdown=source_markdown,
-        assets=assets,
-        confidence_score=page.confidence_score,
-        preprocessing_report=preprocessing_report,
-    )
+    Invariant: structured extraction is downstream of page OCR for PDFs. This
+    clean raster-only copy may fail independently without invalidating Markdown.
+    """
+    if document["is_pdf"]:
+        return _rasterized_pdf_for_annotation(document["content"]), True, "application/pdf"
+    optimized = _preprocessed_document_image(document)
+    return optimized.content, False, optimized.mime_type
 
 
 def _preprocessed_document_image(document: dict) -> PreprocessedImage:
     return preprocess_image(document["content"], str(document["mime_type"]))
 
 
-def _ocr_document_with_template(document: dict, template: dict) -> tuple[list[OcrMarkdown], dict]:
-    content = document["content"]
-    mime_type = str(document["mime_type"])
-    preprocessing_report = None
-    if not document["is_pdf"]:
-        optimized = _preprocessed_document_image(document)
-        content = optimized.content
-        mime_type = optimized.mime_type
-        preprocessing_report = optimized.report
-    combined = ocr_document_with_annotation(
-        content,
-        is_pdf=bool(document["is_pdf"]),
-        mime_type=mime_type,
-        schema_name=f"{template['id']}_v{template['schema_version']}",
-        schema=template["schema"],
-        prompt=template["prompt"],
-        model=MODEL_DEFAULT,
-    )
-    if len(combined.pages) != int(document["num_pages"]):
-        raise RuntimeError("Mistral returned an unexpected number of OCR pages; nothing was saved")
-    pages = [
-        _prepare_ocr_markdown(
+def _infer_document_page(document: dict, page_number: int) -> str:
+    if document["is_pdf"]:
+        optimized = _pdf_page_image_for_ocr(document["content"], page_number)
+        page = ocr_image_with_assets(
+            optimized.content,
+            mime_type=optimized.mime_type,
+            model=MODEL_DEFAULT,
+        )
+        return _prepare_ocr_markdown(
             document,
             page_number,
             page,
-            preprocessing_report=preprocessing_report,
+            preprocessing_report=optimized.report,
         )
-        for page_number, page in enumerate(combined.pages, start=1)
-    ]
-    return pages, _normalize_template_data(combined.document_annotation, template)
-
-
-def _infer_document_page(document: dict, page_number: int) -> str:
-    if document["is_pdf"]:
-        pages = ocr_pdf_pages_with_assets(
-            _single_pdf_page(document["content"], page_number),
-            model=MODEL_DEFAULT,
-        )
-        page = pages[0] if pages else OcrPageResult("")
     else:
         optimized = _preprocessed_document_image(document)
         page = ocr_image_with_assets(
@@ -293,6 +166,47 @@ def _infer_document_page(document: dict, page_number: int) -> str:
     return _prepare_ocr_markdown(document, page_number, page)
 
 
+def _infer_document_pages_batch(
+    document: dict,
+    page_numbers: list[int],
+    cancellation,
+) -> tuple[dict[int, str | Exception], str | None, float]:
+    prepared_inputs: dict[int, PreprocessedImage] = {}
+    for page_number in page_numbers:
+        if cancellation.is_set():
+            raise RuntimeError("OCR batch cancelled")
+        prepared_inputs[page_number] = (
+            _pdf_page_image_for_ocr(document["content"], page_number)
+            if document["is_pdf"]
+            else _preprocessed_document_image(document)
+        )
+    batch = ocr_images_batch(
+        {
+            str(page_number): (optimized.content, optimized.mime_type)
+            for page_number, optimized in prepared_inputs.items()
+        },
+        model=MODEL_DEFAULT,
+        is_cancelled=cancellation.is_set,
+    )
+    results: dict[int, str | Exception] = {}
+    for page_number, optimized in prepared_inputs.items():
+        custom_id = str(page_number)
+        if custom_id in batch.errors:
+            results[page_number] = RuntimeError(batch.errors[custom_id])
+            continue
+        page = batch.pages.get(custom_id)
+        if page is None:
+            results[page_number] = RuntimeError("Mistral returned no result for this page")
+            continue
+        results[page_number] = _prepare_ocr_markdown(
+            document,
+            page_number,
+            page,
+            preprocessing_report=optimized.report,
+        )
+    return results, batch.remote_job_id, batch.duration_seconds
+
+
 def _resume_pending_ocr_jobs() -> None:
     for job in _db().recover_interrupted_ocr_jobs():
         _job_manager().start(
@@ -300,93 +214,11 @@ def _resume_pending_ocr_jobs() -> None:
             int(job["user_id"]),
             str(job["id"]),
             _infer_document_page,
+            _infer_document_pages_batch,
         )
 
 
 _resume_pending_ocr_jobs()
-
-
-def _nullable_text(value: object, limit: int = 500) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text[:limit] if text else None
-
-
-def _nullable_number(value: object) -> float | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, bool):
-        raise ValueError("Amounts must be numbers")
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Amounts must be numbers") from exc
-    if not math.isfinite(number) or not (-1_000_000_000_000 < number < 1_000_000_000_000):
-        raise ValueError("Amount is outside the supported range")
-    return round(number, 6)
-
-
-def _normalize_template_data(data: object, template: dict) -> dict:
-    if not isinstance(data, dict):
-        raise ValueError("Structured extraction must be an object")
-    schema = template["schema"]
-
-    def normalize(value: object, field_schema: dict, depth: int = 0) -> object:
-        if depth > 4:
-            raise ValueError("Structured extraction is nested too deeply")
-        raw_type = field_schema.get("type")
-        allowed_types = raw_type if isinstance(raw_type, list) else [raw_type]
-        non_null_type = next((item for item in allowed_types if item != "null"), None)
-        if value is None:
-            return [] if non_null_type == "array" else None
-        if non_null_type == "string":
-            return _nullable_text(value, 4000)
-        if non_null_type == "number":
-            return _nullable_number(value)
-        if non_null_type == "boolean":
-            if isinstance(value, bool):
-                return value
-            raise ValueError("Boolean fields must be true or false")
-        if non_null_type == "array":
-            if not isinstance(value, list):
-                raise ValueError("Repeated fields must be lists")
-            item_schema = field_schema.get("items", {})
-            normalized_items = [
-                normalize(item, item_schema, depth + 1) for item in value[:500]
-            ]
-            item_type = item_schema.get("type")
-            if item_type == "string" or (
-                isinstance(item_type, list) and "string" in item_type
-            ):
-                unique_items: list[str] = []
-                seen: set[str] = set()
-                for item in normalized_items:
-                    if not isinstance(item, str) or not item:
-                        continue
-                    identity = item.casefold()
-                    if identity in seen:
-                        continue
-                    seen.add(identity)
-                    unique_items.append(item)
-                return unique_items
-            return normalized_items
-        if non_null_type == "object":
-            if not isinstance(value, dict):
-                raise ValueError("Structured sections must be objects")
-            properties = field_schema.get("properties", {})
-            return {
-                key: normalize(value.get(key), child_schema, depth + 1)
-                for key, child_schema in properties.items()
-            }
-        return None
-
-    normalized = {
-        key: normalize(data.get(key), field_schema)
-        for key, field_schema in schema["properties"].items()
-    }
-    normalized["document_type"] = template["id"]
-    return normalized
 
 
 def _template_from_request(template_id: str) -> dict:
@@ -572,7 +404,11 @@ def upload_file(session_id: str) -> tuple[Response, int]:
     content = upload.read()
     if not content:
         raise BadRequest("The uploaded file is empty")
-    is_pdf = extension == ".pdf" or upload.mimetype == "application/pdf"
+    if app.config.get("VALIDATE_UPLOAD_CONTENT", True):
+        is_pdf, mime_type = _validated_upload_type(content, extension)
+    else:
+        is_pdf = extension == ".pdf" or upload.mimetype == "application/pdf"
+        mime_type = upload.mimetype or ("application/pdf" if is_pdf else "image/jpeg")
     template = _optional_template(request.form.get("document_type"))
     document_type = template["id"] if template else None
     duplicate = _db().find_document_by_checksum(ADMIN_USER_ID, session_id, content)
@@ -592,7 +428,7 @@ def upload_file(session_id: str) -> tuple[Response, int]:
         session_id,
         name=name,
         content=content,
-        mime_type=upload.mimetype or ("application/pdf" if is_pdf else "image/jpeg"),
+        mime_type=mime_type,
         is_pdf=is_pdf,
         num_pages=_page_count(content, is_pdf),
         document_type=document_type,
@@ -665,11 +501,11 @@ def preview_file(session_id: str, file_id: str) -> Response:
         )
 
     try:
-        import fitz
+        import pymupdf
 
-        with fitz.open(stream=document["content"], filetype="pdf") as pdf:
+        with pymupdf.open(stream=document["content"], filetype="pdf") as pdf:
             page = pdf[page_number - 1]
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(1.7, 1.7), alpha=False)
+            pixmap = page.get_pixmap(matrix=pymupdf.Matrix(1.7, 1.7), alpha=False)
             png = pixmap.tobytes("png")
         return send_file(io.BytesIO(png), mimetype="image/png", download_name=f"page-{page_number}.png")
     except Exception as exc:
@@ -729,67 +565,110 @@ def run_document_extraction(session_id: str, file_id: str, template_id: str) -> 
         )
     if not _db().claim_document_extraction(file_id, template["id"]):
         raise Conflict("Structured extraction is already running for this document")
-    claimed_pages: list[int] = []
     page_owner_token = f"structured-{secrets.token_hex(8)}"
     ocr_included = False
     try:
-        ocr_content = document["content"]
-        ocr_mime_type = str(document["mime_type"])
-        preprocessing_report = None
-        if not document["is_pdf"]:
-            optimized = _preprocessed_document_image(document)
-            ocr_content = optimized.content
-            ocr_mime_type = optimized.mime_type
-            preprocessing_report = optimized.report
-        has_existing_ocr = _db().count_document_ocr_pages(file_id) > 0
-        if not has_existing_ocr:
-            if _db().get_active_ocr_job(ADMIN_USER_ID, file_id):
-                raise Conflict("Stop the active OCR job before starting structured extraction")
-            for page_number in range(1, int(document["num_pages"]) + 1):
-                if not _db().claim_ocr_page(file_id, page_number, page_owner_token):
-                    raise Conflict(f"Page {page_number} is already being processed")
-                claimed_pages.append(page_number)
+        if _db().get_active_ocr_job(ADMIN_USER_ID, file_id):
+            raise Conflict("Let the active OCR job finish before starting structured extraction")
 
-            combined = ocr_document_with_annotation(
-                ocr_content,
-                is_pdf=bool(document["is_pdf"]),
-                mime_type=ocr_mime_type,
-                schema_name=f"{template['id']}_v{template['schema_version']}",
-                schema=template["schema"],
-                prompt=template["prompt"],
-                model=MODEL_DEFAULT,
-            )
-            if len(combined.pages) != int(document["num_pages"]):
-                raise RuntimeError(
-                    "Mistral returned an unexpected number of OCR pages; nothing was saved"
-                )
-            normalized = _normalize_template_data(combined.document_annotation, template)
+        # A single uploaded image is already one independent page. Preserve
+        # the efficient one-call OCR + annotation path for common receipt and
+        # invoice photos; multi-page PDFs use the resilient page-first flow.
+        if not document["is_pdf"] and _db().count_document_ocr_pages(file_id) == 0:
+            optimized = _preprocessed_document_image(document)
             try:
-                _db().get_document(ADMIN_USER_ID, session_id, file_id)
-            except KeyError as exc:
-                raise NotFound("Document was deleted while OCR was running") from exc
-            for page_number, page in enumerate(combined.pages, start=1):
-                prepared = _prepare_ocr_markdown(
-                    document,
-                    page_number,
-                    page,
-                    preprocessing_report=preprocessing_report,
+                combined = ocr_document_with_annotation(
+                    optimized.content,
+                    is_pdf=False,
+                    mime_type=optimized.mime_type,
+                    schema_name=f"{template['id']}_v{template['schema_version']}",
+                    schema=template["schema"],
+                    prompt=template["prompt"],
+                    model=MODEL_DEFAULT,
                 )
-                _db().save_page_markdown(file_id, page_number, prepared)
-            ocr_included = True
-        else:
-            # Existing Markdown may contain user edits. Preserve it exactly and
-            # request only the annotation instead of replacing page content.
-            result = extract_document_annotation(
-                ocr_content,
-                is_pdf=bool(document["is_pdf"]),
-                mime_type=ocr_mime_type,
-                schema_name=f"{template['id']}_v{template['schema_version']}",
-                schema=template["schema"],
-                prompt=template["prompt"],
-                model=MODEL_DEFAULT,
+            except Exception as annotation_error:
+                # If schema generation fails, make one plain OCR fallback so
+                # the useful Markdown is not lost with the structured stage.
+                prepared = _infer_document_page(document, 1)
+                _db().save_page_markdown(
+                    file_id,
+                    1,
+                    prepared,
+                    expected_checksum=document.get("checksum"),
+                )
+                raise RuntimeError(
+                    "Page OCR was saved, but structured extraction failed"
+                ) from annotation_error
+            if len(combined.pages) != 1:
+                raise RuntimeError("Mistral returned no OCR page for this image")
+            prepared = _prepare_ocr_markdown(
+                document,
+                1,
+                combined.pages[0],
+                preprocessing_report=optimized.report,
             )
-            normalized = _normalize_template_data(result, template)
+            _db().save_page_markdown(
+                file_id,
+                1,
+                prepared,
+                expected_checksum=document.get("checksum"),
+            )
+            ocr_included = True
+            normalized = _normalize_template_data(combined.document_annotation, template)
+            extraction = _db().save_document_extraction(
+                ADMIN_USER_ID,
+                session_id,
+                file_id,
+                template["id"],
+                normalized,
+                MODEL_DEFAULT,
+                schema_version=template["schema_version"],
+            )
+            payload = _extraction_payload(extraction, template)
+            payload["ocr_included"] = True
+            return jsonify(payload)
+
+        failed_pages: list[tuple[int, str]] = []
+        for page_number in range(1, int(document["num_pages"]) + 1):
+            if _db().get_page_markdown(file_id, page_number) is not None:
+                continue
+            if not _db().claim_ocr_page(file_id, page_number, page_owner_token):
+                failed_pages.append((page_number, "already processing"))
+                continue
+            try:
+                prepared = _infer_document_page(document, page_number)
+                _db().save_page_markdown(
+                    file_id,
+                    page_number,
+                    prepared,
+                    expected_checksum=document.get("checksum"),
+                )
+                ocr_included = True
+            except Exception as exc:
+                failed_pages.append((page_number, str(exc)[:160]))
+            finally:
+                _db().release_ocr_page(file_id, page_number, page_owner_token)
+
+        if failed_pages:
+            page_list = ", ".join(str(page) for page, _ in failed_pages)
+            raise RuntimeError(
+                f"OCR was saved for successful pages, but page(s) {page_list} failed. "
+                "Retry those pages before structured extraction."
+            )
+
+        # Annotation is a separate stage. It operates on a clean raster-only
+        # PDF for PDF documents and never replaces stored/user-edited Markdown.
+        annotation_content, annotation_is_pdf, annotation_mime = _annotation_document(document)
+        result = extract_document_annotation(
+            annotation_content,
+            is_pdf=annotation_is_pdf,
+            mime_type=annotation_mime,
+            schema_name=f"{template['id']}_v{template['schema_version']}",
+            schema=template["schema"],
+            prompt=template["prompt"],
+            model=MODEL_DEFAULT,
+        )
+        normalized = _normalize_template_data(result, template)
         extraction = _db().save_document_extraction(
             ADMIN_USER_ID,
             session_id,
@@ -800,8 +679,6 @@ def run_document_extraction(session_id: str, file_id: str, template_id: str) -> 
             schema_version=template["schema_version"],
         )
     finally:
-        for page_number in claimed_pages:
-            _db().release_ocr_page(file_id, page_number, page_owner_token)
         _db().release_document_extraction(file_id, template["id"])
     payload = _extraction_payload(extraction, template)
     payload["ocr_included"] = ocr_included
@@ -884,45 +761,70 @@ def run_ocr(session_id: str, file_id: str, page_number: int) -> Response:
         _db().get_document_extraction(ADMIN_USER_ID, session_id, file_id, template["id"])
         if template else None
     )
-    can_combine = (
+    if (
         result is None
         and not force
+        and not document["is_pdf"]
         and template is not None
         and extraction is None
-        and _db().count_document_ocr_pages(file_id) == 0
-        and int(document["num_pages"]) <= DOCUMENT_ANNOTATION_PAGE_LIMIT
-    )
-    if can_combine:
-        owner_token = f"typed-{secrets.token_hex(8)}"
-        claimed_pages: list[int] = []
-        extraction_claimed = False
+    ):
+        owner_token = f"typed-image-{secrets.token_hex(8)}"
+        if not _db().claim_ocr_page(file_id, page_number, owner_token):
+            raise Conflict("This page is already being processed")
+        if not _db().claim_document_extraction(file_id, template["id"]):
+            _db().release_ocr_page(file_id, page_number, owner_token)
+            raise Conflict("Structured extraction is already running for this document")
         try:
-            if not _db().claim_document_extraction(file_id, template["id"]):
-                raise Conflict("Structured extraction is already running for this document")
-            extraction_claimed = True
-            for claimed_page in range(1, int(document["num_pages"]) + 1):
-                if not _db().claim_ocr_page(file_id, claimed_page, owner_token):
-                    raise Conflict(f"Page {claimed_page} is already being processed")
-                claimed_pages.append(claimed_page)
-            prepared_pages, normalized = _ocr_document_with_template(document, template)
-            _db().get_document(ADMIN_USER_ID, session_id, file_id)
-            for claimed_page, prepared in enumerate(prepared_pages, start=1):
-                _db().save_page_markdown(file_id, claimed_page, prepared)
-            extraction = _db().save_document_extraction(
-                ADMIN_USER_ID,
-                session_id,
-                file_id,
-                template["id"],
-                normalized,
-                MODEL_DEFAULT,
-                schema_version=template["schema_version"],
-            )
-            result = prepared_pages[page_number - 1]
+            optimized = _preprocessed_document_image(document)
+            try:
+                combined = ocr_document_with_annotation(
+                    optimized.content,
+                    is_pdf=False,
+                    mime_type=optimized.mime_type,
+                    schema_name=f"{template['id']}_v{template['schema_version']}",
+                    schema=template["schema"],
+                    prompt=template["prompt"],
+                    model=MODEL_DEFAULT,
+                )
+            except Exception:
+                result = _infer_document_page(document, page_number)
+                _db().save_page_markdown(
+                    file_id,
+                    page_number,
+                    result,
+                    expected_checksum=document.get("checksum"),
+                )
+                combined = None
+            if combined is None:
+                extraction = None
+            else:
+                if len(combined.pages) != 1:
+                    raise RuntimeError("Mistral returned no OCR page for this image")
+                result = _prepare_ocr_markdown(
+                    document,
+                    page_number,
+                    combined.pages[0],
+                    preprocessing_report=optimized.report,
+                )
+                _db().save_page_markdown(
+                    file_id,
+                    page_number,
+                    result,
+                    expected_checksum=document.get("checksum"),
+                )
+                normalized = _normalize_template_data(combined.document_annotation, template)
+                extraction = _db().save_document_extraction(
+                    ADMIN_USER_ID,
+                    session_id,
+                    file_id,
+                    template["id"],
+                    normalized,
+                    MODEL_DEFAULT,
+                    schema_version=template["schema_version"],
+                )
         finally:
-            for claimed_page in claimed_pages:
-                _db().release_ocr_page(file_id, claimed_page, owner_token)
-            if extraction_claimed:
-                _db().release_document_extraction(file_id, template["id"])
+            _db().release_document_extraction(file_id, template["id"])
+            _db().release_ocr_page(file_id, page_number, owner_token)
     if result is None or force:
         owner_token = f"manual-{secrets.token_hex(8)}"
         if not _db().claim_ocr_page(file_id, page_number, owner_token):
@@ -933,7 +835,12 @@ def run_ocr(session_id: str, file_id: str, page_number: int) -> Response:
                 _db().get_document(ADMIN_USER_ID, session_id, file_id)
             except KeyError as exc:
                 raise NotFound("Document was deleted while OCR was running") from exc
-            _db().save_page_markdown(file_id, page_number, result)
+            _db().save_page_markdown(
+                file_id,
+                page_number,
+                result,
+                expected_checksum=document.get("checksum"),
+            )
         finally:
             _db().release_ocr_page(file_id, page_number, owner_token)
     return jsonify({"markdown": result, "model": MODEL_DEFAULT, "extraction": extraction})
@@ -974,17 +881,23 @@ def run_all_ocr(session_id: str, file_id: str) -> tuple[Response, int]:
             file_id,
             force=force,
             page_numbers=page_numbers,
+            processing_mode="adaptive",
+            rate_limit_ppm=_job_manager().rate_controller.pages_per_minute,
         )
     except sqlite3.IntegrityError as exc:
         raise Conflict("An OCR-all-pages job is already active for this document") from exc
-    _job_manager().start(_db(), ADMIN_USER_ID, job_id, _infer_document_page)
+    _job_manager().start(
+        _db(), ADMIN_USER_ID, job_id, _infer_document_page, _infer_document_pages_batch
+    )
     return jsonify(_db().get_ocr_job(ADMIN_USER_ID, job_id)), 202
 
 
 @app.get("/api/ocr-jobs/<job_id>")
 def get_ocr_job(job_id: str) -> Response:
     try:
-        return jsonify(_db().get_ocr_job(ADMIN_USER_ID, job_id))
+        payload = _db().get_ocr_job(ADMIN_USER_ID, job_id)
+        payload["scheduler"] = _job_manager().scheduler_status()
+        return jsonify(payload)
     except KeyError as exc:
         raise NotFound("OCR job not found") from exc
 
@@ -1011,7 +924,9 @@ def retry_ocr_job(job_id: str) -> tuple[Response, int]:
         raise NotFound("OCR job not found") from exc
     except (ValueError, sqlite3.IntegrityError) as exc:
         raise Conflict(str(exc)) from exc
-    _job_manager().start(_db(), ADMIN_USER_ID, retry_id, _infer_document_page)
+    _job_manager().start(
+        _db(), ADMIN_USER_ID, retry_id, _infer_document_page, _infer_document_pages_batch
+    )
     return jsonify(retry_job), 202
 
 
@@ -1209,7 +1124,7 @@ def handle_http_error(error: Exception) -> tuple[Response, int]:
 @app.errorhandler(Exception)
 def handle_unexpected_error(error: Exception) -> tuple[Response, int]:
     app.logger.exception("Unhandled application error")
-    return jsonify({"error": str(error) or "Unexpected server error"}), 500
+    return jsonify({"error": "Unexpected server error. Check logs/api.log for details."}), 500
 
 
 if __name__ == "__main__":

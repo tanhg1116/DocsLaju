@@ -1,8 +1,16 @@
+"""Mistral API boundary for OCR, annotations, and asynchronous micro-batches.
+
+Functions in this module translate provider objects into small DocsLaju result
+types. They do not write application state; persistence remains the caller's
+responsibility.
+"""
+
 from __future__ import annotations
 
 import base64
 import json
 import os
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import List, Any
@@ -43,6 +51,14 @@ class OcrPageResult:
 class OcrDocumentResult:
     pages: tuple[OcrPageResult, ...]
     document_annotation: dict
+
+
+@dataclass(frozen=True)
+class OcrBatchResult:
+    pages: dict[str, OcrPageResult]
+    errors: dict[str, str]
+    remote_job_id: str
+    duration_seconds: float
 
 
 class OcrMarkdown(str):
@@ -102,6 +118,16 @@ def get_client() -> Any:
         detail = f": {_MISTRAL_IMPORT_ERROR}" if _MISTRAL_IMPORT_ERROR else ""
         raise RuntimeError(f"mistralai could not be imported{detail}")
     return Mistral(api_key=_get_api_key())
+
+
+def _delete_uploaded_file(client: Any, uploaded_file: Any) -> None:
+    if uploaded_file is None:
+        return
+    try:
+        client.files.delete(file_id=uploaded_file.id)
+        log_api("files.delete:ok", extra={"file_id": getattr(uploaded_file, "id", None)})
+    except Exception as cleanup_error:
+        log_api("files.delete:error", extra={"error": str(cleanup_error)[:200]})
 
 
 def _replace_images_in_markdown(markdown_str: str, images_dict: dict) -> str:
@@ -231,26 +257,31 @@ def ocr_pdf_pages_with_assets(
     client = get_client()
 
     log_api("files.upload:start", extra={"purpose": "ocr", "bytes": len(pdf_bytes)})
-    uploaded_file = client.files.upload(
-        file={
-            "file_name": "document.pdf",
-            "content": pdf_bytes,
-        },
-        purpose="ocr",
-    )
-    log_api("files.upload:ok", extra={"file_id": getattr(uploaded_file, "id", None)})
-    log_api("files.get_signed_url:start", extra={"file_id": getattr(uploaded_file, "id", None)})
-    signed_url = client.files.get_signed_url(file_id=uploaded_file.id, expiry=1)
-    log_api("files.get_signed_url:ok")
+    uploaded_file = None
+    try:
+        uploaded_file = client.files.upload(
+            file={
+                "file_name": "document.pdf",
+                "content": pdf_bytes,
+            },
+            purpose="ocr",
+        )
+        log_api("files.upload:ok", extra={"file_id": getattr(uploaded_file, "id", None)})
+        log_api("files.get_signed_url:start", extra={"file_id": getattr(uploaded_file, "id", None)})
+        signed_url = client.files.get_signed_url(file_id=uploaded_file.id, expiry=1)
+        log_api("files.get_signed_url:ok")
 
-    log_api("ocr.process:start", extra={"model": model or MODEL_DEFAULT, "type": "pdf"})
-    ocr_response = client.ocr.process(
-        document={"type": "document_url", "document_url": signed_url.url},
-        model=model or MODEL_DEFAULT,
-        include_image_base64=include_images,
-        confidence_scores_granularity="page",
-    )
-    log_api("ocr.process:ok", extra={"pages": len(getattr(ocr_response, "pages", []) or [])})
+        log_api("ocr.process:start", extra={"model": model or MODEL_DEFAULT, "type": "pdf"})
+        ocr_response = client.ocr.process(
+            document={"type": "document_url", "document_url": signed_url.url},
+            model=model or MODEL_DEFAULT,
+            include_image_base64=include_images,
+            confidence_scores_granularity="page",
+        )
+        log_api("ocr.process:ok", extra={"pages": len(getattr(ocr_response, "pages", []) or [])})
+    finally:
+        if uploaded_file is not None:
+            _delete_uploaded_file(client, uploaded_file)
 
     pages: List[OcrPageResult] = []
     for page in ocr_response.pages:
@@ -326,6 +357,147 @@ def ocr_image_markdown(image_bytes: bytes, *, model: str | None = None) -> str:
     )
 
 
+def _download_bytes(download: Any) -> bytes:
+    if hasattr(download, "read"):
+        return bytes(download.read())
+    stream = getattr(download, "stream", None)
+    if stream is not None:
+        return b"".join(bytes(chunk) for chunk in stream)
+    if isinstance(download, (bytes, bytearray)):
+        return bytes(download)
+    raise RuntimeError("Mistral returned an unreadable batch result")
+
+
+def _mapping_page(body: dict) -> OcrPageResult:
+    pages = body.get("pages") or []
+    if not pages:
+        return OcrPageResult("")
+    page = pages[0] or {}
+    images = tuple(
+        OcrImageResult(str(image.get("id")), str(image.get("image_base64")))
+        for image in (page.get("images") or [])
+        if image.get("id") and image.get("image_base64")
+    )
+    scores = page.get("confidence_scores") or {}
+    confidence = scores.get("average_page_confidence_score")
+    try:
+        confidence = max(0.0, min(1.0, float(confidence))) if confidence is not None else None
+    except (TypeError, ValueError):
+        confidence = None
+    return OcrPageResult(str(page.get("markdown") or ""), images, confidence)
+
+
+def ocr_images_batch(
+    images: dict[str, tuple[bytes, str]],
+    *,
+    model: str | None = None,
+    is_cancelled: Any = None,
+    poll_seconds: float = 0.75,
+) -> OcrBatchResult:
+    """Submit independent page images through Mistral's asynchronous Batch API."""
+    if not images:
+        raise ValueError("An OCR batch needs at least one image")
+    client = get_client()
+    selected_model = model or MODEL_DEFAULT
+    requests = []
+    for custom_id, (content, mime_type) in images.items():
+        safe_mime = mime_type if mime_type.startswith("image/") else "image/png"
+        encoded = base64.b64encode(content).decode()
+        requests.append({
+            "custom_id": str(custom_id),
+            "body": {
+                "document": {
+                    "type": "image_url",
+                    "image_url": f"data:{safe_mime};base64,{encoded}",
+                },
+                "include_image_base64": True,
+                "confidence_scores_granularity": "page",
+            },
+        })
+
+    # File batching avoids the request-body size ceiling hit when several
+    # rasterized pages are passed through the inline `requests` parameter.
+    # Mistral's OCR Batch cookbook likewise uploads JSONL with purpose=batch.
+    batch_jsonl = b"\n".join(
+        json.dumps(item, separators=(",", ":")).encode("utf-8") for item in requests
+    ) + b"\n"
+    input_file = None
+    result_file_ids: list[str | None] = []
+    started = time.monotonic()
+    try:
+        input_file = client.files.upload(
+            file={
+                "file_name": f"docslaju-ocr-{int(time.time())}.jsonl",
+                "content": batch_jsonl,
+            },
+            purpose="batch",
+        )
+        job = client.batch.jobs.create(
+            input_files=[input_file.id],
+            model=selected_model,
+            endpoint="/v1/ocr",
+            metadata={"job_type": "docslaju_auto_ocr"},
+        )
+        remote_job_id = str(job.id)
+        log_api("batch.ocr:start", extra={"job_id": remote_job_id, "pages": len(images)})
+        while str(getattr(job, "status", "")).upper() in {
+            "QUEUED", "RUNNING", "CANCELLATION_REQUESTED"
+        }:
+            if is_cancelled and is_cancelled():
+                try:
+                    client.batch.jobs.cancel(job_id=job.id)
+                finally:
+                    raise RuntimeError("OCR batch cancelled")
+            time.sleep(max(0.2, min(float(poll_seconds), 2.0)))
+            job = client.batch.jobs.get(job_id=job.id)
+
+        result_file_ids = [
+            getattr(job, "output_file", None),
+            getattr(job, "error_file", None),
+        ]
+        status = str(getattr(job, "status", "")).upper()
+        if status != "SUCCESS":
+            raise RuntimeError(f"Mistral OCR batch ended with status {status or 'UNKNOWN'}")
+
+        pages: dict[str, OcrPageResult] = {}
+        errors: dict[str, str] = {}
+        output_file = getattr(job, "output_file", None)
+        if output_file:
+            payload = _download_bytes(client.files.download(file_id=output_file)).decode("utf-8")
+            for line in payload.splitlines():
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                custom_id = str(item.get("custom_id"))
+                response = item.get("response") or {}
+                status_code = int(response.get("status_code") or 0)
+                body = response.get("body") or {}
+                if status_code == 200:
+                    pages[custom_id] = _mapping_page(body)
+                else:
+                    errors[custom_id] = str(item.get("error") or body or f"HTTP {status_code}")[:500]
+        error_file = getattr(job, "error_file", None)
+        if error_file:
+            payload = _download_bytes(client.files.download(file_id=error_file)).decode("utf-8")
+            for line in payload.splitlines():
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                errors[str(item.get("custom_id"))] = str(item.get("error") or item)[:500]
+
+        log_api(
+            "batch.ocr:ok",
+            extra={"job_id": remote_job_id, "pages": len(pages), "errors": len(errors)},
+        )
+        return OcrBatchResult(pages, errors, remote_job_id, time.monotonic() - started)
+    finally:
+        for file_id in result_file_ids:
+            if file_id:
+                _delete_uploaded_file(client, type("RemoteFile", (), {"id": file_id})())
+        if input_file is not None:
+            _delete_uploaded_file(client, input_file)
+
+
 def _annotation_response_format(schema_name: str, schema: dict) -> dict:
     return {
         "type": "json_schema",
@@ -380,41 +552,45 @@ def ocr_document_with_annotation(
 ) -> OcrDocumentResult:
     """Return OCR pages and a strict document annotation from one API call."""
     client = get_client()
-    if is_pdf:
-        uploaded_file = client.files.upload(
-            file={"file_name": "document.pdf", "content": content},
-            purpose="ocr",
-        )
-        signed_url = client.files.get_signed_url(file_id=uploaded_file.id, expiry=1)
-        document = {"type": "document_url", "document_url": signed_url.url}
-    else:
-        safe_mime = mime_type if mime_type.startswith("image/") else "image/jpeg"
-        encoded = base64.b64encode(content).decode()
-        document = {
-            "type": "image_url",
-            "image_url": f"data:{safe_mime};base64,{encoded}",
-        }
+    uploaded_file = None
+    try:
+        if is_pdf:
+            uploaded_file = client.files.upload(
+                file={"file_name": "document.pdf", "content": content},
+                purpose="ocr",
+            )
+            signed_url = client.files.get_signed_url(file_id=uploaded_file.id, expiry=1)
+            document = {"type": "document_url", "document_url": signed_url.url}
+        else:
+            safe_mime = mime_type if mime_type.startswith("image/") else "image/jpeg"
+            encoded = base64.b64encode(content).decode()
+            document = {
+                "type": "image_url",
+                "image_url": f"data:{safe_mime};base64,{encoded}",
+            }
 
-    selected_model = model or MODEL_DEFAULT
-    log_api(
-        "ocr.process:start",
-        extra={"model": selected_model, "type": "ocr_with_annotation", "schema": schema_name},
-    )
-    response = client.ocr.process(
-        document=document,
-        model=selected_model,
-        include_image_base64=True,
-        confidence_scores_granularity="page",
-        document_annotation_format=_annotation_response_format(schema_name, schema),
-        document_annotation_prompt=prompt,
-    )
-    pages = _ocr_pages_from_response(response)
-    annotation = _parse_document_annotation(response)
-    log_api(
-        "ocr.process:ok",
-        extra={"type": "ocr_with_annotation", "schema": schema_name, "pages": len(pages)},
-    )
-    return OcrDocumentResult(pages, annotation)
+        selected_model = model or MODEL_DEFAULT
+        log_api(
+            "ocr.process:start",
+            extra={"model": selected_model, "type": "ocr_with_annotation", "schema": schema_name},
+        )
+        response = client.ocr.process(
+            document=document,
+            model=selected_model,
+            include_image_base64=True,
+            confidence_scores_granularity="page",
+            document_annotation_format=_annotation_response_format(schema_name, schema),
+            document_annotation_prompt=prompt,
+        )
+        pages = _ocr_pages_from_response(response)
+        annotation = _parse_document_annotation(response)
+        log_api(
+            "ocr.process:ok",
+            extra={"type": "ocr_with_annotation", "schema": schema_name, "pages": len(pages)},
+        )
+        return OcrDocumentResult(pages, annotation)
+    finally:
+        _delete_uploaded_file(client, uploaded_file)
 
 
 def extract_document_annotation(
@@ -429,33 +605,37 @@ def extract_document_annotation(
 ) -> dict:
     """Extract a strict structured annotation without altering OCR Markdown."""
     client = get_client()
-    if is_pdf:
-        uploaded_file = client.files.upload(
-            file={"file_name": "document.pdf", "content": content},
-            purpose="ocr",
-        )
-        signed_url = client.files.get_signed_url(file_id=uploaded_file.id, expiry=1)
-        document = {"type": "document_url", "document_url": signed_url.url}
-    else:
-        safe_mime = mime_type if mime_type.startswith("image/") else "image/jpeg"
-        encoded = base64.b64encode(content).decode()
-        document = {
-            "type": "image_url",
-            "image_url": f"data:{safe_mime};base64,{encoded}",
-        }
+    uploaded_file = None
+    try:
+        if is_pdf:
+            uploaded_file = client.files.upload(
+                file={"file_name": "document.pdf", "content": content},
+                purpose="ocr",
+            )
+            signed_url = client.files.get_signed_url(file_id=uploaded_file.id, expiry=1)
+            document = {"type": "document_url", "document_url": signed_url.url}
+        else:
+            safe_mime = mime_type if mime_type.startswith("image/") else "image/jpeg"
+            encoded = base64.b64encode(content).decode()
+            document = {
+                "type": "image_url",
+                "image_url": f"data:{safe_mime};base64,{encoded}",
+            }
 
-    selected_model = model or MODEL_DEFAULT
-    log_api(
-        "ocr.process:start",
-        extra={"model": selected_model, "type": "document_annotation", "schema": schema_name},
-    )
-    response = client.ocr.process(
-        document=document,
-        model=selected_model,
-        include_image_base64=False,
-        document_annotation_format=_annotation_response_format(schema_name, schema),
-        document_annotation_prompt=prompt,
-    )
-    result = _parse_document_annotation(response)
-    log_api("ocr.process:ok", extra={"type": "document_annotation", "schema": schema_name})
-    return result
+        selected_model = model or MODEL_DEFAULT
+        log_api(
+            "ocr.process:start",
+            extra={"model": selected_model, "type": "document_annotation", "schema": schema_name},
+        )
+        response = client.ocr.process(
+            document=document,
+            model=selected_model,
+            include_image_base64=False,
+            document_annotation_format=_annotation_response_format(schema_name, schema),
+            document_annotation_prompt=prompt,
+        )
+        result = _parse_document_annotation(response)
+        log_api("ocr.process:ok", extra={"type": "document_annotation", "schema": schema_name})
+        return result
+    finally:
+        _delete_uploaded_file(client, uploaded_file)

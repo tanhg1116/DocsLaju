@@ -38,9 +38,9 @@ def _load_session_file(session: Session, *, name: str, content: bytes, is_pdf: b
     num_pages = 1
     if is_pdf:
         try:
-            import PyPDF2  # type: ignore
+            import pypdf  # type: ignore
 
-            reader = PyPDF2.PdfReader(io.BytesIO(content))
+            reader = pypdf.PdfReader(io.BytesIO(content))
             num_pages = len(reader.pages)
         except Exception:
             num_pages = 1
@@ -71,13 +71,13 @@ def _resolve_active_file(session: Session) -> SessionFile | None:
 
 def _extract_single_pdf_page(pdf_bytes: bytes, page_number: int) -> bytes:
     """Return a one-page PDF (1-based page_number) extracted from pdf_bytes."""
-    import PyPDF2  # type: ignore
+    import pypdf  # type: ignore
 
-    reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
     total = len(reader.pages)
     idx = max(1, min(page_number, total)) - 1
 
-    writer = PyPDF2.PdfWriter()
+    writer = pypdf.PdfWriter()
     writer.add_page(reader.pages[idx])
     out = io.BytesIO()
     writer.write(out)
@@ -192,14 +192,14 @@ def render_main_panes(session: Session, active_session_id: str = None, executor 
                 # Ensure num_pages is accurate
                 if not active_file.num_pages or active_file.num_pages <= 1:
                     try:
-                        import fitz  # type: ignore
-                        doc = fitz.open(stream=active_file.bytes, filetype="pdf")
+                        import pymupdf  # type: ignore
+                        doc = pymupdf.open(stream=active_file.bytes, filetype="pdf")
                         active_file.num_pages = len(doc)
                         doc.close()
                     except Exception:
                         try:
-                            import PyPDF2  # type: ignore
-                            reader = PyPDF2.PdfReader(io.BytesIO(active_file.bytes))
+                            import pypdf  # type: ignore
+                            reader = pypdf.PdfReader(io.BytesIO(active_file.bytes))
                             active_file.num_pages = len(reader.pages)
                         except Exception:
                             active_file.num_pages = active_file.num_pages or 1

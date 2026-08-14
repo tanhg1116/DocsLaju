@@ -16,7 +16,7 @@ def render_pdf(file_state: SessionFile) -> None:
         return
 
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
     except Exception:  # pragma: no cover - environment-dependent
         st.warning(
             "PDF preview requires PyMuPDF. Please install the 'PyMuPDF' package to enable image preview."
@@ -24,7 +24,7 @@ def render_pdf(file_state: SessionFile) -> None:
         return
 
     try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        doc = pymupdf.open(stream=file_bytes, filetype="pdf")
     except Exception as e:  # pragma: no cover
         st.error(f"Failed to open PDF: {e}")
         return
@@ -42,7 +42,7 @@ def render_pdf(file_state: SessionFile) -> None:
 
         # Render with 2x zoom for clarity
         zoom = 2.0
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pymupdf.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img_bytes = pix.tobytes("png")
 

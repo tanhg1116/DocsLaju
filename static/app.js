@@ -1,3 +1,24 @@
+/*
+ * DocsLaju browser controller.
+ *
+ * Review by feature using docs/REVIEW_GUIDE.md. Pure range, extraction,
+ * icon, and rendered-Markdown layout logic lives in static/modules/. Flask
+ * state is durable truth; local changes are reconciled by API responses.
+ */
+
+import { parseAutoOcrRange, fullDocumentRange } from "./modules/auto-ocr-range.js";
+import {
+  normalizedTemplateSearch,
+  numberOrNull,
+  templateSearchText,
+} from "./modules/extraction-utils.js";
+import {
+  formatNumberedEquations,
+  normalizeRenderedLists,
+  renderMath,
+} from "./modules/markdown-layout.js";
+import { iconMarkup, setIconButton } from "./modules/ui-icons.js";
+
 const ui = {
   workspaceGrid: document.querySelector("#workspaceGrid"),
   previewPaneResizer: document.querySelector("#previewPaneResizer"),
@@ -149,17 +170,6 @@ let extractionEditMode = false;
 let workspaceView = "markdown";
 let paneRatios = { preview: 0.34, raw: 0.33 };
 const expandedProjects = new Set();
-
-function iconMarkup(name, extraClass = "") {
-  return `<svg class="ui-icon${extraClass ? ` ${extraClass}` : ""}" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
-}
-
-function setIconButton(button, label, iconName = null, spinning = false) {
-  button.setAttribute("aria-label", label);
-  button.dataset.tooltip = label;
-  if (iconName) button.querySelector("use")?.setAttribute("href", `#icon-${iconName}`);
-  button.classList.toggle("icon-spinning", spinning);
-}
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -716,6 +726,8 @@ function renderFilePicker(session) {
 }
 
 function updateBatchControls(job) {
+  // Cancellation/priority invariant: controls mirror the durable job returned
+  // by Flask. The browser never assumes an in-flight provider request stopped.
   clearTimeout(jobPollTimer);
   jobPollTimer = null;
   const document = activeDocument();
@@ -760,11 +772,15 @@ function updateBatchControls(job) {
   const percent = total ? Math.round(done / total * 100) : 0;
   ui.batchProgressCount.textContent = `${done} / ${total}`;
   ui.batchProgressBar.style.width = `${percent}%`;
+  const scheduler = job.scheduler || state.ocr_scheduler || {};
+  const processingMode = job.processing_mode === "batch"
+    ? "Mistral Batch"
+    : `Real-time${scheduler.current_concurrency ? ` · up to ${scheduler.current_concurrency} parallel` : ""}`;
   ui.batchProgressLabel.textContent = job.status === "cancelling"
     ? "Stopping after the current request…"
     : job.current_page
-      ? `Processing page ${job.current_page}…`
-      : "Preparing page queue…";
+      ? `${processingMode} · processing page ${job.current_page}…`
+      : `${processingMode} · preparing page queue…`;
   const currentPage = job.pages?.find((page) => page.page_number === document.current_page);
   if (currentPage && ["queued", "running"].includes(currentPage.status)) {
     ui.ocrButton.disabled = currentPage.status === "running" || job.status === "cancelling";
@@ -832,161 +848,6 @@ function updateWorkflowStatus(document, overrideStep = null) {
 function updateWords(value) {
   const words = value.trim() ? value.trim().split(/\s+/).length : 0;
   ui.wordCount.textContent = `${words} ${words === 1 ? "word" : "words"}`;
-}
-
-function renderMath(root) {
-  if (typeof globalThis.renderMathInElement !== "function") return;
-  globalThis.renderMathInElement(root, {
-    delimiters: [
-      { left: "$$", right: "$$", display: true },
-      { left: "\\[", right: "\\]", display: true },
-      { left: "\\(", right: "\\)", display: false },
-    ],
-    throwOnError: false,
-    strict: "ignore",
-  });
-}
-
-function formatNumberedEquations(root) {
-  for (const paragraph of root.querySelectorAll("p")) {
-    const elementChildren = [...paragraph.children];
-    if (elementChildren.length !== 1) continue;
-
-    const mathHost = elementChildren[0];
-    const katex = mathHost.matches(".katex") ? mathHost : mathHost.querySelector(".katex");
-    if (!katex || mathHost.matches(".katex-display") || mathHost.closest(".katex-display")) continue;
-
-    const nodes = [...paragraph.childNodes];
-    const mathIndex = nodes.indexOf(mathHost);
-    if (mathIndex < 0) continue;
-    const beforeNodes = nodes.slice(0, mathIndex);
-    const afterNodes = nodes.slice(mathIndex + 1);
-    if (![...beforeNodes, ...afterNodes].every((node) => node.nodeType === 3)) continue;
-
-    const before = beforeNodes.map((node) => node.textContent).join("");
-    const after = afterNodes.map((node) => node.textContent).join("");
-    const labelMatch = before.match(/^\s*(\(?\d+(?:\.\d+)+\)?)\s+$/);
-    const punctuationMatch = after.match(/^\s*([.,;:!?]?)\s*$/);
-    if (!labelMatch || !punctuationMatch) continue;
-
-    const label = document.createElement("span");
-    label.className = "numbered-equation-label";
-    label.textContent = labelMatch[1];
-    const body = document.createElement("span");
-    body.className = "numbered-equation-body";
-    body.append(mathHost);
-    if (punctuationMatch[1]) body.append(document.createTextNode(punctuationMatch[1]));
-    paragraph.classList.add("numbered-equation");
-    paragraph.replaceChildren(label, body);
-  }
-}
-
-function orderedListEnd(list) {
-  let value = Number.parseInt(list.getAttribute("start") || "1", 10) - 1;
-  for (const item of [...list.children].filter((child) => child.tagName === "LI")) {
-    value = item.hasAttribute("value")
-      ? Number.parseInt(item.getAttribute("value"), 10)
-      : value + 1;
-  }
-  return value;
-}
-
-function formatLetteredSubparts(root) {
-  for (const paragraph of root.querySelectorAll("li p")) {
-    const directText = [...paragraph.childNodes]
-      .filter((node) => node.nodeType === 3)
-      .map((node) => node.textContent)
-      .join("");
-    if (!/^\s*\([a-z]\)\s/i.test(directText)) continue;
-
-    const rows = [];
-    let body = null;
-    let invalid = false;
-    for (const node of [...paragraph.childNodes]) {
-      if (node.nodeType !== 3) {
-        if (!body) {
-          invalid = true;
-          break;
-        }
-        body.append(node);
-        continue;
-      }
-
-      const text = node.textContent || "";
-      const markerPattern = /\(([a-z])\)(?=\s)/gi;
-      let cursor = 0;
-      let match;
-      while ((match = markerPattern.exec(text)) !== null) {
-        const preceding = text.slice(cursor, match.index);
-        if (body) body.append(document.createTextNode(preceding));
-        else if (preceding.trim()) invalid = true;
-
-        const row = document.createElement("span");
-        row.className = "exercise-subpart";
-        const label = document.createElement("span");
-        label.className = "exercise-subpart-label";
-        label.textContent = `(${match[1].toLowerCase()})`;
-        body = document.createElement("span");
-        body.className = "exercise-subpart-body";
-        row.append(label, body);
-        rows.push(row);
-        cursor = markerPattern.lastIndex;
-      }
-      if (body) body.append(document.createTextNode(text.slice(cursor)));
-      else if (text.trim()) invalid = true;
-      if (invalid) break;
-    }
-
-    if (invalid || !rows.length) continue;
-    paragraph.classList.add("exercise-subparts");
-    paragraph.replaceChildren(...rows);
-  }
-}
-
-function normalizeRenderedLists(root) {
-  const lists = [...root.children].filter((child) => child.tagName === "OL");
-  for (const list of lists) {
-    if (!list.isConnected || list.parentElement !== root) continue;
-    while (true) {
-      const between = [];
-      let next = list.nextElementSibling;
-      let blocked = false;
-      while (next && next.tagName !== "OL") {
-        if (/^H[1-6]$/.test(next.tagName) || next.tagName === "HR") {
-          blocked = true;
-          break;
-        }
-        between.push(next);
-        next = next.nextElementSibling;
-      }
-      if (blocked || !next) break;
-
-      const nextStart = Number.parseInt(next.getAttribute("start") || "1", 10);
-      if (nextStart !== orderedListEnd(list) + 1) break;
-      const lastItem = list.lastElementChild;
-      if (!lastItem || lastItem.tagName !== "LI") break;
-      for (const block of between) lastItem.append(block);
-      for (const item of [...next.children]) list.append(item);
-      next.remove();
-    }
-  }
-
-  for (const list of [...root.children].filter((child) => child.tagName === "OL")) {
-    const lastItem = list.lastElementChild;
-    if (!lastItem || !/(?:[:;,]|\b(?:then|is|are|equals|where|by))\s*$/i.test(lastItem.textContent.trim())) continue;
-    let block = list.nextElementSibling;
-    if (!block || block.tagName !== "P" || block.children.length !== 1 || !block.querySelector(".katex-display")) continue;
-    let following = block.nextElementSibling;
-    lastItem.append(block);
-    block = following;
-    while (block && block.tagName === "P" && /^[a-z]/.test(block.textContent.trim())) {
-      following = block.nextElementSibling;
-      lastItem.append(block);
-      block = following;
-    }
-  }
-
-  formatLetteredSubparts(root);
 }
 
 function activeSearchTerms() {
@@ -1260,6 +1121,8 @@ async function changePage(page) {
 }
 
 async function runOcr() {
+  // Cost invariant: when Auto-OCR owns this page, promote its persistent queue
+  // row instead of launching a duplicate Mistral request.
   const document = activeDocument();
   const session = activeSession();
   if (!document) return;
@@ -1323,27 +1186,6 @@ async function runOcr() {
     if (manualOcrContext === context) manualOcrContext = null;
     setBusy(false);
   }
-}
-
-function parseAutoOcrRange(value, totalPages) {
-  const source = value.trim();
-  if (!source) throw new Error("Enter a page or page range");
-  const pages = new Set();
-  for (const rawPart of source.split(",")) {
-    const part = rawPart.trim();
-    const match = part.match(/^(\d+)\s*(?:-\s*(\d+))?$/);
-    if (!match) throw new Error("Use ranges such as 1-3, 5, 8-10");
-    let start = Number(match[1]);
-    let end = Number(match[2] || match[1]);
-    if (start > end) [start, end] = [end, start];
-    if (start < 1 || end > totalPages) throw new Error(`Pages must be between 1 and ${totalPages}`);
-    for (let page = start; page <= end; page += 1) pages.add(page);
-  }
-  return [...pages].sort((a, b) => a - b);
-}
-
-function fullDocumentRange(document) {
-  return document.num_pages === 1 ? "1" : `1-${document.num_pages}`;
 }
 
 function updateAutoOcrRangeStatus() {
@@ -1718,15 +1560,6 @@ function extractionEndpoint(suffix = "") {
   return routeForDocument(`/extractions/${encodeURIComponent(template?.id || "")}${suffix}`);
 }
 
-function normalizedTemplateSearch(value) {
-  return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-}
-
-function templateSearchText(template) {
-  const aliases = template.id === "resume" ? "cv resume curriculum vitae" : "";
-  return normalizedTemplateSearch(`${template.id} ${template.label} ${template.description} ${aliases}`);
-}
-
 function closeExtractionTemplateMenu() {
   ui.extractionProfileMenu.hidden = true;
   ui.extractionProfile.setAttribute("aria-expanded", "false");
@@ -1930,10 +1763,6 @@ function renderExtraction(extraction) {
   ui.extractionModel.textContent = extraction.model || "mistral-ocr-latest";
   ui.approveExtractionButton.textContent = approved ? "Return to review" : "Approve";
   setExtractionEditMode(false);
-}
-
-function numberOrNull(value) {
-  return value === "" ? null : Number(value);
 }
 
 function readExtractionForm() {

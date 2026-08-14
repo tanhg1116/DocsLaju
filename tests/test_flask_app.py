@@ -5,10 +5,10 @@ import time
 import zipfile
 from pathlib import Path
 
-import PyPDF2
+import pypdf
 from PIL import Image
 
-from app import _normalize_template_data, _prepare_ocr_markdown, app
+from app import _infer_document_page, _normalize_template_data, _prepare_ocr_markdown, app
 from src.extraction_templates import get_template
 from src.mistral_client import (
     MODEL_DEFAULT,
@@ -18,6 +18,7 @@ from src.mistral_client import (
     OcrPageResult,
 )
 from src.services.database import ADMIN_USER_ID, Database
+from src.services.ocr_jobs import AdaptiveRateController, OcrAttemptOutcome, OcrJobManager
 
 
 def _test_png_bytes() -> bytes:
@@ -32,6 +33,7 @@ def test_schema_contains_the_persistent_repository(isolated_database: Path):
         "document_assets", "ocr_jobs", "ocr_job_pages", "ocr_page_claims",
         "document_pages_fts",
         "document_extractions", "document_extraction_claims",
+        "ocr_scheduler_metrics",
     }
     with sqlite3.connect(isolated_database) as connection:
         tables = {
@@ -44,6 +46,14 @@ def test_schema_contains_the_persistent_repository(isolated_database: Path):
             row[1] for row in connection.execute("PRAGMA table_info(ocr_job_pages)")
         }
         assert "priority" in job_page_columns
+        assert {
+            "attempts", "processing_mode", "remote_batch_id", "error_code", "duration_ms"
+        } <= job_page_columns
+        job_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(ocr_jobs)")
+        }
+        assert {"processing_mode", "document_checksum", "rate_limit_ppm"} <= job_columns
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] >= 1
         page_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(document_pages)")
         }
@@ -57,6 +67,32 @@ def test_schema_contains_the_persistent_repository(isolated_database: Path):
             row[1] for row in connection.execute("PRAGMA table_info(document_extractions)")
         }
         assert "schema_version" in extraction_columns
+
+
+def test_scheduler_telemetry_survives_manager_restart(isolated_database: Path):
+    database = app.extensions["database"]
+    database.save_scheduler_metrics({
+        "pages_per_minute_limit": 1250,
+        "target_utilization": 0.88,
+        "current_concurrency": 9,
+        "realtime_latency_ewma": 1.25,
+        "realtime_throughput_pps": 6.5,
+        "realtime_samples": 120,
+        "batch_seconds_per_page": 0.42,
+        "batch_samples": 64,
+        "rate_limit_events": 2,
+    })
+
+    restarted = OcrJobManager(database=database, max_concurrency=24)
+    status = restarted.scheduler_status()
+
+    assert status["current_concurrency"] == 9
+    assert status["average_page_seconds"] == 1.25
+    assert status["observed_pages_per_second"] == 6.5
+    assert status["realtime_samples"] == 120
+    assert status["batch_seconds_per_page"] == 0.42
+    assert status["batch_samples"] == 64
+    assert status["rate_limit_events"] == 2
 
 
 def test_upload_persists_optional_document_type(isolated_database: Path):
@@ -414,6 +450,8 @@ def test_initial_state_has_one_session():
         assert payload["user"]["role"] == "admin"
         assert payload["active_document"] is None
         assert payload["model"] == "mistral-ocr-latest"
+        assert payload["ocr_scheduler"]["pages_per_minute_limit"] == 1250
+        assert payload["ocr_scheduler"]["target_pages_per_minute"] == 1100
 
 
 def test_project_and_session_actions_persist_after_repository_reopens(isolated_database: Path):
@@ -520,6 +558,9 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
     with app.test_client() as client:
         page = client.get("/")
         script = client.get("/static/app.js")
+        icon_script = client.get("/static/modules/ui-icons.js")
+        extraction_script = client.get("/static/modules/extraction-utils.js")
+        markdown_script = client.get("/static/modules/markdown-layout.js")
         css = client.get("/static/app.css")
 
         for icon_id in (
@@ -536,8 +577,8 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         assert b'class="auto-ocr-track"' in page.data
         assert b'id="adminAvatar" aria-hidden="true"' in page.data
         assert b'class="rendered-title-actions"' in page.data
-        assert b"function iconMarkup" in script.data
-        assert b"function setIconButton" in script.data
+        assert b"function iconMarkup" in icon_script.data
+        assert b"function setIconButton" in icon_script.data
         assert b"navigator.clipboard.read" in script.data
         assert b'ui.importDialog.addEventListener("paste"' in script.data
         assert b'document.addEventListener("paste"' in script.data
@@ -555,18 +596,18 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         assert b'id="icon-moon"' in page.data
         assert b'id="icon-sun"' in page.data
         assert b"function renderExtractionTemplateOptions" in script.data
-        assert b"function normalizedTemplateSearch" in script.data
+        assert b"function normalizedTemplateSearch" in extraction_script.data
         assert b'ui.extractionProfile.addEventListener("input"' in script.data
         assert b"control.readOnly = !extractionEditMode" in script.data
         assert b'editExtractionButton.addEventListener("click"' in script.data
         assert b".extraction-edit-only" in css.data
         assert b".extraction-template-menu" in css.data
         assert b"Ctrl+V" in page.data
-        assert b"function formatNumberedEquations" in script.data
+        assert b"function formatNumberedEquations" in markdown_script.data
         assert b"formatNumberedEquations(ui.renderedContent)" in script.data
-        assert b"function normalizeRenderedLists" in script.data
+        assert b"function normalizeRenderedLists" in markdown_script.data
         assert b"normalizeRenderedLists(ui.renderedContent)" in script.data
-        assert b"function formatLetteredSubparts" in script.data
+        assert b"function formatLetteredSubparts" in markdown_script.data
         assert b".prose .numbered-equation" in css.data
         assert b".prose .exercise-subparts" in css.data
 
@@ -740,7 +781,7 @@ def test_ocr_assets_use_short_links_render_live_export_and_cascade(isolated_data
 
 def test_print_view_preserves_source_page_order_and_marks_missing_ocr_pages():
     source = io.BytesIO()
-    writer = PyPDF2.PdfWriter()
+    writer = pypdf.PdfWriter()
     for _ in range(3):
         writer.add_blank_page(width=320, height=480)
     writer.write(source)
@@ -862,12 +903,18 @@ def test_unfinished_queue_is_resumable_and_failed_pages_can_be_retried(isolated_
     retry_id = database.retry_failed_ocr_job(ADMIN_USER_ID, job_id)
     retry = database.get_ocr_job(ADMIN_USER_ID, retry_id)
     assert retry["status"] == "queued"
-    assert retry["pages"] == [{
+    assert len(retry["pages"]) == 1
+    assert retry["pages"][0] == {
         "page_number": 1,
         "priority": 0,
         "status": "queued",
+        "attempts": 0,
+        "processing_mode": None,
+        "remote_batch_id": None,
+        "error_code": None,
+        "duration_ms": None,
         "error": None,
-    }]
+    }
 
 
 def test_ocr_all_runs_in_background_and_kill_switch_discards_inflight_result(monkeypatch):
@@ -915,7 +962,7 @@ def test_ocr_all_runs_in_background_and_kill_switch_discards_inflight_result(mon
 
 def test_ocr_all_processes_every_pdf_page_without_blocking_request(monkeypatch):
     monkeypatch.setattr("app._infer_document_page", lambda _document, page: f"# Page {page}")
-    writer = PyPDF2.PdfWriter()
+    writer = pypdf.PdfWriter()
     for _ in range(3):
         writer.add_blank_page(width=320, height=480)
     source = io.BytesIO()
@@ -956,7 +1003,7 @@ def test_ocr_all_processes_only_the_requested_page_range(monkeypatch):
         return f"# Page {page}"
 
     monkeypatch.setattr("app._infer_document_page", record_inference)
-    writer = PyPDF2.PdfWriter()
+    writer = pypdf.PdfWriter()
     for _ in range(5):
         writer.add_blank_page(width=320, height=480)
     source = io.BytesIO()
@@ -1011,7 +1058,7 @@ def test_current_page_promotion_jumps_ahead_of_the_automatic_queue(monkeypatch):
         return f"# Page {page_number}"
 
     monkeypatch.setattr("app._infer_document_page", ordered_inference)
-    writer = PyPDF2.PdfWriter()
+    writer = pypdf.PdfWriter()
     for _ in range(3):
         writer.add_blank_page(width=320, height=480)
     source = io.BytesIO()
@@ -1046,6 +1093,212 @@ def test_current_page_promotion_jumps_ahead_of_the_automatic_queue(monkeypatch):
             time.sleep(0.02)
         assert job["status"] == "completed"
         assert processing_order == [1, 3, 2]
+
+
+def test_pdf_page_ocr_is_submitted_as_a_raster_image(monkeypatch):
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=320, height=480)
+    source = io.BytesIO()
+    writer.write(source)
+    captured = {}
+
+    def image_ocr(content, *, mime_type, model):
+        captured.update(content=content, mime_type=mime_type, model=model)
+        return OcrPageResult("# Raster page", confidence_score=0.92)
+
+    monkeypatch.setattr("app.ocr_image_with_assets", image_ocr)
+    result = _infer_document_page(
+        {
+            "name": "problematic.pdf",
+            "content": source.getvalue(),
+            "is_pdf": True,
+            "mime_type": "application/pdf",
+        },
+        1,
+    )
+
+    assert str(result) == "# Raster page"
+    assert captured["mime_type"].startswith("image/")
+    assert captured["content"].startswith((b"\x89PNG", b"\xff\xd8"))
+    assert result.preprocessing_report["source"] == "rasterized_pdf_page"
+
+
+def test_adaptive_rate_controller_increases_slowly_and_halves_on_429():
+    controller = AdaptiveRateController(
+        pages_per_minute=1250,
+        target_utilization=0.88,
+        initial_concurrency=2,
+        max_concurrency=6,
+    )
+
+    for _ in range(8):
+        controller.finish(OcrAttemptOutcome(True, 0.25))
+    assert controller.concurrency == 3
+
+    controller.note_rate_limit(0)
+    assert controller.concurrency == 1
+    assert controller.pages_per_minute == 1250
+
+    fixed = AdaptiveRateController(
+        pages_per_minute=1250,
+        target_utilization=0.88,
+        initial_concurrency=2,
+        max_concurrency=2,
+    )
+    for _ in range(8):
+        fixed.finish(OcrAttemptOutcome(True, 0.25))
+    assert fixed.throughput_pages_per_second is not None
+
+
+def test_adaptive_mode_does_not_guess_that_batch_is_faster():
+    manager = OcrJobManager(batch_enabled=True, batch_min_pages=1)
+
+    assert manager._choose_mode(1000, lambda *_args: None) == "realtime"
+
+
+def test_realtime_job_retries_transient_page_without_repeating_success(isolated_database: Path):
+    database = app.extensions["database"]
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        document_id = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(b"retry-image"), "retry.png")},
+            content_type="multipart/form-data",
+        ).get_json()["active_document"]["id"]
+
+    calls = []
+
+    class TemporaryError(RuntimeError):
+        status_code = 503
+
+    def flaky(_document, page_number):
+        calls.append(page_number)
+        if len(calls) == 1:
+            raise TemporaryError("temporary upstream failure")
+        return "# Saved after retry"
+
+    manager = OcrJobManager(
+        initial_concurrency=1,
+        max_concurrency=1,
+        max_attempts=2,
+        batch_enabled=False,
+    )
+    job_id = database.create_ocr_job(ADMIN_USER_ID, session_id, document_id)
+    manager.start(database, ADMIN_USER_ID, job_id, flaky)
+
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        job = database.get_ocr_job(ADMIN_USER_ID, job_id)
+        if job["status"] == "completed":
+            break
+        time.sleep(0.02)
+
+    assert job["status"] == "completed"
+    assert calls == [1, 1]
+    assert job["pages"][0]["attempts"] == 2
+    assert database.get_page_markdown(document_id, 1) == "# Saved after retry"
+
+
+def test_remote_batch_results_remain_page_independent(monkeypatch, isolated_database: Path):
+    monkeypatch.setenv("OCR_BATCH_FORCE", "true")
+    database = app.extensions["database"]
+    writer = pypdf.PdfWriter()
+    for _ in range(2):
+        writer.add_blank_page(width=320, height=480)
+    source = io.BytesIO()
+    writer.write(source)
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        document_id = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(source.getvalue()), "batch.pdf")},
+            content_type="multipart/form-data",
+        ).get_json()["active_document"]["id"]
+
+    def batch_processor(_document, pages, _cancellation):
+        return (
+            {page: f"# Batch page {page}" for page in reversed(pages)},
+            "remote-batch-1",
+            0.5,
+        )
+
+    manager = OcrJobManager(
+        initial_concurrency=1,
+        max_concurrency=1,
+        batch_enabled=True,
+        batch_min_pages=1,
+        batch_size=2,
+    )
+    job_id = database.create_ocr_job(ADMIN_USER_ID, session_id, document_id)
+    manager.start(
+        database,
+        ADMIN_USER_ID,
+        job_id,
+        lambda *_args: (_ for _ in ()).throw(AssertionError("real-time path used")),
+        batch_processor,
+    )
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        job = database.get_ocr_job(ADMIN_USER_ID, job_id)
+        if job["status"] == "completed":
+            break
+        time.sleep(0.02)
+
+    assert job["status"] == "completed"
+    assert job["processing_mode"] == "batch"
+    assert {page["remote_batch_id"] for page in job["pages"]} == {"remote-batch-1"}
+    assert database.get_page_markdown(document_id, 1) == "# Batch page 1"
+    assert database.get_page_markdown(document_id, 2) == "# Batch page 2"
+    metrics = database.get_scheduler_metrics()
+    assert metrics["batch_samples"] == 2
+    assert metrics["batch_seconds_per_page"] is not None
+
+
+def test_structured_extraction_failure_keeps_successful_pdf_pages(monkeypatch):
+    writer = pypdf.PdfWriter()
+    for _ in range(2):
+        writer.add_blank_page(width=320, height=480)
+    source = io.BytesIO()
+    writer.write(source)
+
+    def partially_failing(_document, page_number):
+        if page_number == 2:
+            raise RuntimeError("page two upstream error")
+        return "# Page one is durable"
+
+    monkeypatch.setattr("app._infer_document_page", partially_failing)
+    with app.test_client() as client:
+        session_id = client.get("/api/state").get_json()["active_session_id"]
+        document_id = client.post(
+            f"/api/sessions/{session_id}/files",
+            data={"file": (io.BytesIO(source.getvalue()), "partial.pdf")},
+            content_type="multipart/form-data",
+        ).get_json()["active_document"]["id"]
+
+        response = client.post(
+            f"/api/sessions/{session_id}/files/{document_id}/extractions/receipt/run"
+        )
+
+    assert response.status_code == 500
+    assert app.extensions["database"].get_page_markdown(document_id, 1) == "# Page one is durable"
+    assert app.extensions["database"].get_page_markdown(document_id, 2) is None
+
+
+def test_upload_content_validation_rejects_renamed_non_image():
+    app.config["VALIDATE_UPLOAD_CONTENT"] = True
+    try:
+        with app.test_client() as client:
+            session_id = client.get("/api/state").get_json()["active_session_id"]
+            response = client.post(
+                f"/api/sessions/{session_id}/files",
+                data={"file": (io.BytesIO(b"not really a PNG"), "pretend.png")},
+                content_type="multipart/form-data",
+            )
+    finally:
+        app.config["VALIDATE_UPLOAD_CONTENT"] = False
+
+    assert response.status_code == 400
+    assert "readable image" in response.get_json()["error"]
 
 
 def test_image_upload_edit_render_and_export():
@@ -1100,7 +1353,7 @@ def test_markdown_preview_bundles_katex_and_preserves_table_rendering():
         assert b'vendor/katex/katex.min.js' in page.data
         assert b'vendor/katex/contrib/auto-render.min.js' in page.data
 
-        script = client.get("/static/app.js")
+        script = client.get("/static/modules/markdown-layout.js")
         assert b"renderMathInElement" in script.data
         assert b'{ left: "$$", right: "$$", display: true }' in script.data
 
@@ -1192,7 +1445,7 @@ def test_pdf_preview_uses_the_browser_viewer_without_a_synthetic_text_layer():
 
 
 def test_pdf_content_route_serves_the_unmodified_original_file():
-    writer = PyPDF2.PdfWriter()
+    writer = pypdf.PdfWriter()
     writer.add_blank_page(width=320, height=480)
     source = io.BytesIO()
     writer.write(source)

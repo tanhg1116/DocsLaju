@@ -1,3 +1,9 @@
+"""SQLite repository and transaction boundaries for DocsLaju.
+
+This module owns durable invariants. Callers should not reproduce its claim,
+deduplication, page-completion, or cascade rules in Flask routes.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -76,6 +82,28 @@ class Database:
                 connection.execute(
                     "ALTER TABLE document_pages ADD COLUMN review_status TEXT NOT NULL DEFAULT 'unreviewed'"
                 )
+            for name, definition in {
+                "attempts": "INTEGER NOT NULL DEFAULT 0",
+                "processing_mode": "TEXT",
+                "remote_batch_id": "TEXT",
+                "error_code": "TEXT",
+                "duration_ms": "INTEGER",
+            }.items():
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE ocr_job_pages ADD COLUMN {name} {definition}"
+                    )
+            job_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(ocr_jobs)").fetchall()
+            }
+            for name, definition in {
+                "processing_mode": "TEXT NOT NULL DEFAULT 'adaptive'",
+                "document_checksum": "TEXT",
+                "rate_limit_ppm": "INTEGER NOT NULL DEFAULT 1250",
+            }.items():
+                if name not in job_columns:
+                    connection.execute(f"ALTER TABLE ocr_jobs ADD COLUMN {name} {definition}")
             if "reviewed_at" not in page_columns:
                 connection.execute("ALTER TABLE document_pages ADD COLUMN reviewed_at TEXT")
             extraction_columns = {
@@ -108,7 +136,26 @@ class Database:
             )
             connection.execute("DELETE FROM document_extraction_claims")
             self._migrate_embedded_assets(connection)
+            self._apply_migrations(connection)
         self.ensure_active_session(ADMIN_USER_ID)
+
+    def _apply_migrations(self, connection: sqlite3.Connection) -> None:
+        """Apply each checked-in migration exactly once."""
+        migrations_dir = self.schema_path.parent / "migrations"
+        if not migrations_dir.exists():
+            return
+        applied = {
+            str(row["version"])
+            for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        for migration in sorted(migrations_dir.glob("*.sql")):
+            if migration.name in applied:
+                continue
+            connection.executescript(migration.read_text(encoding="utf-8"))
+            connection.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?)",
+                (migration.name,),
+            )
 
     @staticmethod
     def _id() -> str:
@@ -540,7 +587,27 @@ class Database:
             ).fetchone()
         return int(row["count"])
 
-    def save_page_markdown(self, document_id: str, page_number: int, markdown: str) -> None:
+    def save_page_markdown(
+        self,
+        document_id: str,
+        page_number: int,
+        markdown: str,
+        *,
+        job_id: str | None = None,
+        expected_checksum: str | None = None,
+        duration_ms: int | None = None,
+        processing_mode: str | None = None,
+        remote_batch_id: str | None = None,
+    ) -> None:
+        """Persist one page and optionally finish its job row atomically.
+
+        Invariant: Markdown, assets, confidence metadata, and the completed job
+        status share one transaction. A restart must not pay to reprocess a page
+        whose content was already committed.
+
+        Concurrency: expected_checksum rejects a result produced for stale
+        document bytes, while job_id requires the page still to be running.
+        """
         editable_markdown = str(markdown)
         source_markdown = getattr(markdown, "source_markdown", None)
         assets = getattr(markdown, "assets", None)
@@ -557,6 +624,14 @@ class Database:
         )
         review_status = "needs_review" if is_ocr_result and needs_review else "unreviewed"
         with self.transaction() as connection:
+            document = connection.execute(
+                "SELECT session_id, checksum FROM documents WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+            if not document:
+                raise KeyError("Document not found")
+            if expected_checksum and document["checksum"] != expected_checksum:
+                raise ValueError("Document content changed while OCR was running")
             connection.execute(
                 """
                 INSERT INTO document_pages
@@ -589,12 +664,6 @@ class Database:
                 ),
             )
             if assets is not None:
-                document = connection.execute(
-                    "SELECT session_id FROM documents WHERE id = ?",
-                    (document_id,),
-                ).fetchone()
-                if not document:
-                    raise KeyError("Document not found")
                 connection.execute(
                     "DELETE FROM document_assets WHERE document_id = ? AND page_number = ?",
                     (document_id, page_number),
@@ -621,6 +690,20 @@ class Database:
                             hashlib.sha256(content).hexdigest(),
                         ),
                     )
+            if job_id is not None:
+                cursor = connection.execute(
+                    """
+                    UPDATE ocr_job_pages
+                    SET status = 'completed', error = NULL, error_code = NULL,
+                        duration_ms = ?, processing_mode = COALESCE(?, processing_mode),
+                        remote_batch_id = COALESCE(?, remote_batch_id),
+                        finished_at = CURRENT_TIMESTAMP
+                    WHERE job_id = ? AND page_number = ? AND status = 'running'
+                    """,
+                    (duration_ms, processing_mode, remote_batch_id, job_id, page_number),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("OCR page is no longer active")
             connection.execute(
                 """
                 UPDATE sessions SET updated_at = CURRENT_TIMESTAMP
@@ -744,12 +827,27 @@ class Database:
         user_id: int,
         session_id: str,
         document_id: str,
+        *,
+        include_content: bool = True,
     ) -> list[dict]:
-        self.get_document(user_id, session_id, document_id)
+        columns = "*" if include_content else (
+            "id, session_id, document_id, page_number, source_ref, object_type, "
+            "filename, mime_type, checksum, created_at"
+        )
         with self.connect() as connection:
-            rows = connection.execute(
+            authorized = connection.execute(
                 """
-                SELECT * FROM document_assets
+                SELECT 1 FROM documents d
+                JOIN sessions s ON s.id = d.session_id
+                WHERE d.id = ? AND d.session_id = ? AND s.user_id = ?
+                """,
+                (document_id, session_id, user_id),
+            ).fetchone()
+            if not authorized:
+                raise KeyError("Document not found")
+            rows = connection.execute(
+                f"""
+                SELECT {columns} FROM document_assets
                 WHERE session_id = ? AND document_id = ?
                 ORDER BY page_number, filename
                 """,
@@ -889,6 +987,11 @@ class Database:
         return [dict(row) for row in resumable]
 
     def claim_ocr_page(self, document_id: str, page_number: int, owner_token: str) -> bool:
+        """Acquire the cross-request duplicate-inference lock for one page.
+
+        Cost invariant: the primary key makes the claim atomic across manual
+        routes and automatic workers; only the successful owner may call Mistral.
+        """
         try:
             with self.transaction() as connection:
                 connection.execute(
@@ -914,7 +1017,14 @@ class Database:
         *,
         force: bool = False,
         page_numbers: list[int] | None = None,
+        processing_mode: str = "adaptive",
+        rate_limit_ppm: int = 1250,
     ) -> str:
+        """Create a persistent page queue, reusing prior successes by default.
+
+        Cost: unless force=True, pages already present in document_pages begin
+        as completed and are never submitted again.
+        """
         document = self.get_document(user_id, session_id, document_id)
         requested_pages = (
             page_numbers
@@ -928,10 +1038,21 @@ class Database:
         with self.transaction() as connection:
             connection.execute(
                 """
-                INSERT INTO ocr_jobs (id, user_id, session_id, document_id, force_reprocess)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO ocr_jobs
+                    (id, user_id, session_id, document_id, force_reprocess,
+                     processing_mode, document_checksum, rate_limit_ppm)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job_id, user_id, session_id, document_id, int(force)),
+                (
+                    job_id,
+                    user_id,
+                    session_id,
+                    document_id,
+                    int(force),
+                    processing_mode,
+                    document.get("checksum"),
+                    max(1, int(rate_limit_ppm)),
+                ),
             )
             completed = set()
             if not force:
@@ -970,7 +1091,11 @@ class Database:
             if not job:
                 raise KeyError("OCR job not found")
             pages = connection.execute(
-                "SELECT page_number, priority, status, error FROM ocr_job_pages WHERE job_id = ? ORDER BY page_number",
+                """
+                SELECT page_number, priority, status, attempts, processing_mode, remote_batch_id,
+                       error_code, duration_ms, error
+                FROM ocr_job_pages WHERE job_id = ? ORDER BY page_number
+                """,
                 (job_id,),
             ).fetchall()
         payload = dict(job)
@@ -984,6 +1109,32 @@ class Database:
         running = next((row["page_number"] for row in pages if row["status"] == "running"), None)
         payload["current_page"] = running
         return payload
+
+    def set_ocr_job_mode(self, job_id: str, mode: str) -> None:
+        if mode not in {"adaptive", "realtime", "batch"}:
+            raise ValueError("Unknown OCR processing mode")
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE ocr_jobs SET processing_mode = ? WHERE id = ?",
+                (mode, job_id),
+            )
+
+    def record_ocr_job_page_attempt(
+        self,
+        job_id: str,
+        page_number: int,
+        mode: str,
+    ) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE ocr_job_pages
+                SET attempts = attempts + 1, processing_mode = ?, error = NULL,
+                    error_code = NULL
+                WHERE job_id = ? AND page_number = ?
+                """,
+                (mode, job_id, page_number),
+            )
 
     def get_active_ocr_job(self, user_id: int, document_id: str) -> dict | None:
         with self.connect() as connection:
@@ -1124,17 +1275,43 @@ class Database:
                 )
         return self.get_ocr_job(user_id, job_id)
 
-    def mark_ocr_job_page(self, job_id: str, page_number: int, status: str, error: str | None = None) -> None:
+    def mark_ocr_job_page(
+        self,
+        job_id: str,
+        page_number: int,
+        status: str,
+        error: str | None = None,
+        *,
+        error_code: str | None = None,
+        duration_ms: int | None = None,
+        processing_mode: str | None = None,
+        remote_batch_id: str | None = None,
+    ) -> None:
         with self.transaction() as connection:
             connection.execute(
                 """
                 UPDATE ocr_job_pages SET status = ?, error = ?,
+                    error_code = ?, duration_ms = COALESCE(?, duration_ms),
+                    processing_mode = COALESCE(?, processing_mode),
+                    remote_batch_id = COALESCE(?, remote_batch_id),
                     priority = CASE WHEN ? = 'running' THEN 0 ELSE priority END,
                     started_at = CASE WHEN ? = 'running' THEN CURRENT_TIMESTAMP ELSE started_at END,
                     finished_at = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN CURRENT_TIMESTAMP ELSE finished_at END
                 WHERE job_id = ? AND page_number = ?
                 """,
-                (status, error, status, status, status, job_id, page_number),
+                (
+                    status,
+                    error,
+                    error_code,
+                    duration_ms,
+                    processing_mode,
+                    remote_batch_id,
+                    status,
+                    status,
+                    status,
+                    job_id,
+                    page_number,
+                ),
             )
 
     def finalize_ocr_job_if_idle(self, job_id: str) -> bool:
@@ -1182,6 +1359,51 @@ class Database:
                 (status, error, job_id),
             )
 
+    def get_scheduler_metrics(self) -> dict | None:
+        """Return the durable scheduler aggregate for the local API account."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM ocr_scheduler_metrics WHERE id = 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def save_scheduler_metrics(self, metrics: dict) -> None:
+        """Persist learned scheduler state without retaining document content."""
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO ocr_scheduler_metrics (
+                    id, pages_per_minute_limit, target_utilization,
+                    current_concurrency, realtime_latency_ewma,
+                    realtime_throughput_pps, realtime_samples,
+                    batch_seconds_per_page, batch_samples, rate_limit_events,
+                    updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    pages_per_minute_limit = excluded.pages_per_minute_limit,
+                    target_utilization = excluded.target_utilization,
+                    current_concurrency = excluded.current_concurrency,
+                    realtime_latency_ewma = excluded.realtime_latency_ewma,
+                    realtime_throughput_pps = excluded.realtime_throughput_pps,
+                    realtime_samples = excluded.realtime_samples,
+                    batch_seconds_per_page = excluded.batch_seconds_per_page,
+                    batch_samples = excluded.batch_samples,
+                    rate_limit_events = excluded.rate_limit_events,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    max(1, int(metrics["pages_per_minute_limit"])),
+                    float(metrics["target_utilization"]),
+                    max(1, int(metrics["current_concurrency"])),
+                    metrics.get("realtime_latency_ewma"),
+                    metrics.get("realtime_throughput_pps"),
+                    max(0, int(metrics.get("realtime_samples", 0))),
+                    metrics.get("batch_seconds_per_page"),
+                    max(0, int(metrics.get("batch_samples", 0))),
+                    max(0, int(metrics.get("rate_limit_events", 0))),
+                ),
+            )
+
     def state(self, user_id: int, model: str) -> dict:
         active_session_id = self.ensure_active_session(user_id)
         with self.connect() as connection:
@@ -1210,8 +1432,14 @@ class Database:
             active_document = None
             for session_row in session_rows:
                 session = dict(session_row)
+                # Performance invariant: /api/state is metadata-only. Original
+                # document BLOBs are served from the dedicated content route.
                 document_rows = connection.execute(
-                    "SELECT * FROM documents WHERE session_id = ? ORDER BY created_at",
+                    """
+                    SELECT id, session_id, name, mime_type, is_pdf, num_pages,
+                           current_page, document_type, checksum, created_at
+                    FROM documents WHERE session_id = ? ORDER BY created_at
+                    """,
                     (session["id"],),
                 ).fetchall()
                 files = []
@@ -1253,7 +1481,11 @@ class Database:
 
                 if session["id"] == active_session_id and session["active_document_id"]:
                     document = connection.execute(
-                        "SELECT * FROM documents WHERE id = ? AND session_id = ?",
+                        """
+                        SELECT id, session_id, name, mime_type, is_pdf, num_pages,
+                               current_page, document_type, checksum, created_at
+                        FROM documents WHERE id = ? AND session_id = ?
+                        """,
                         (session["active_document_id"], session["id"]),
                     ).fetchone()
                     if document:
