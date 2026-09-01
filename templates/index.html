@@ -168,7 +168,7 @@
       </header>
 
       <section class="workspace-grid" id="workspaceGrid">
-        <article class="pane pane-document">
+        <article class="pane pane-document" id="documentPane">
           <div class="pane-title">
             <div>
               <span class="pane-icon purple"><svg class="ui-icon"><use href="#icon-file-text"></use></svg></span>
@@ -182,6 +182,7 @@
                 <input id="autoOcrToggle" type="checkbox" role="switch" aria-label="Automatic OCR for selected pages" disabled>
                 <span class="auto-ocr-track" aria-hidden="true"><span></span></span>
               </label>
+              <button class="icon-button icon-tooltip pane-minimize-button" id="minimizeDocumentPane" type="button" aria-label="Minimize PDF preview" aria-expanded="true" data-tooltip="Minimize PDF preview"><svg class="ui-icon"><use href="#icon-minus"></use></svg></button>
             </div>
           </div>
 
@@ -220,7 +221,7 @@
 
         <div class="pane-resizer" id="previewPaneResizer" role="separator" aria-label="Resize document preview" aria-orientation="vertical" aria-valuemin="24" aria-valuemax="55" tabindex="0"></div>
 
-        <article class="pane pane-rendered">
+        <article class="pane pane-rendered" id="renderedPane">
           <div class="pane-title">
             <div>
               <span class="pane-icon blue"><svg class="ui-icon"><use href="#icon-eye"></use></svg></span>
@@ -234,6 +235,7 @@
               <button class="review-action-button approve icon-tooltip" id="approvePageButton" aria-label="Approve this page" data-tooltip="Approve this page" disabled><svg class="ui-icon"><use href="#icon-circle-check"></use></svg></button>
               <button class="document-ocr-button icon-tooltip" id="ocrButton" aria-label="Run OCR on this page" data-tooltip="Run OCR on this page" disabled><svg class="ui-icon"><use href="#icon-scan-text"></use></svg></button>
               <span class="badge" id="ocrBadge">Waiting</span>
+              <button class="icon-button icon-tooltip pane-minimize-button" id="minimizeRenderedPane" type="button" aria-label="Minimize rendered Markdown" aria-expanded="true" data-tooltip="Minimize rendered Markdown"><svg class="ui-icon"><use href="#icon-minus"></use></svg></button>
             </div>
           </div>
 
@@ -263,7 +265,7 @@
               <div class="batch-progress-track"><span id="batchProgressBar"></span></div>
             </div>
             <div class="batch-recovery" id="batchRecovery" hidden>
-              <span id="batchError">Some pages could not be processed.</span>
+              <div id="batchError" role="alert" aria-live="polite">Some pages could not be processed.</div>
               <button class="icon-button icon-tooltip" id="retryBatchButton" type="button" aria-label="Retry failed OCR pages" data-tooltip="Retry failed OCR pages"><svg class="ui-icon"><use href="#icon-refresh"></use></svg></button>
             </div>
           </div>
@@ -271,7 +273,7 @@
 
         <div class="pane-resizer" id="rawPaneResizer" role="separator" aria-label="Resize raw Markdown panel" aria-orientation="vertical" aria-valuemin="22" aria-valuemax="48" tabindex="0"></div>
 
-        <article class="pane pane-editor">
+        <article class="pane pane-editor" id="rawPane">
           <div class="pane-title">
             <div>
               <span class="pane-icon amber"><svg class="ui-icon"><use href="#icon-code"></use></svg></span>
@@ -280,7 +282,10 @@
                 <p>Edit the OCR output directly</p>
               </div>
             </div>
-            <span class="word-count" id="wordCount">0 words</span>
+            <div class="editor-title-actions">
+              <span class="word-count" id="wordCount">0 words</span>
+              <button class="icon-button icon-tooltip pane-minimize-button" id="minimizeRawPane" type="button" aria-label="Minimize raw Markdown" aria-expanded="true" data-tooltip="Minimize raw Markdown"><svg class="ui-icon"><use href="#icon-minus"></use></svg></button>
+            </div>
           </div>
 
           <textarea id="markdownEditor" spellcheck="false" aria-label="Raw Markdown editor" placeholder="OCR output will appear here…" disabled></textarea>

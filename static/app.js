@@ -18,11 +18,18 @@ import {
   renderMath,
 } from "./modules/markdown-layout.js";
 import { iconMarkup, setIconButton } from "./modules/ui-icons.js";
+import { ocrRecoveryMessage } from "./modules/ocr-job-errors.js";
 
 const ui = {
   workspaceGrid: document.querySelector("#workspaceGrid"),
+  documentPane: document.querySelector("#documentPane"),
+  renderedPane: document.querySelector("#renderedPane"),
+  rawPane: document.querySelector("#rawPane"),
   previewPaneResizer: document.querySelector("#previewPaneResizer"),
   rawPaneResizer: document.querySelector("#rawPaneResizer"),
+  minimizeDocumentPane: document.querySelector("#minimizeDocumentPane"),
+  minimizeRenderedPane: document.querySelector("#minimizeRenderedPane"),
+  minimizeRawPane: document.querySelector("#minimizeRawPane"),
   workflowStatus: document.querySelector("#workflowStatus"),
   sessionList: document.querySelector("#sessionList"),
   projectList: document.querySelector("#projectList"),
@@ -169,6 +176,7 @@ let currentExtractionLayout = null;
 let extractionEditMode = false;
 let workspaceView = "markdown";
 let paneRatios = { preview: 0.34, raw: 0.33 };
+let minimizedPanes = { document: false, rendered: false, raw: false };
 const expandedProjects = new Set();
 
 async function api(url, options = {}) {
@@ -751,8 +759,7 @@ function updateBatchControls(job) {
   ui.batchRecovery.hidden = !recoverable;
 
   if (recoverable) {
-    const count = (job.failed_pages || 0) + (job.cancelled_pages || 0);
-    ui.batchError.textContent = `${count} page${count === 1 ? "" : "s"} did not finish. Retry only those pages.`;
+    ui.batchError.textContent = ocrRecoveryMessage(job);
     ui.retryBatchButton.dataset.jobId = job.id;
   } else {
     delete ui.retryBatchButton.dataset.jobId;
@@ -1855,12 +1862,35 @@ function applyPaneLayout() {
   const rawPercent = Math.round(paneRatios.raw * 10000) / 100;
   ui.workspaceGrid.style.setProperty("--preview-pane", `${previewPercent}%`);
   ui.workspaceGrid.style.setProperty("--raw-pane", `${rawPercent}%`);
+  ui.workspaceGrid.classList.toggle("document-pane-minimized", minimizedPanes.document);
+  ui.workspaceGrid.classList.toggle("rendered-pane-minimized", minimizedPanes.rendered);
+  ui.workspaceGrid.classList.toggle("raw-pane-minimized", minimizedPanes.raw);
+  const paneControls = [
+    ["document", ui.documentPane, ui.minimizeDocumentPane, "PDF preview"],
+    ["rendered", ui.renderedPane, ui.minimizeRenderedPane, "rendered Markdown"],
+    ["raw", ui.rawPane, ui.minimizeRawPane, "raw Markdown"],
+  ];
+  for (const [kind, pane, button, label] of paneControls) {
+    const minimized = minimizedPanes[kind];
+    pane.classList.toggle("is-minimized", minimized);
+    button.setAttribute("aria-expanded", String(!minimized));
+    setIconButton(button, `${minimized ? "Restore" : "Minimize"} ${label}`, minimized ? "plus" : "minus");
+  }
   ui.previewPaneResizer.setAttribute("aria-valuenow", String(Math.round(previewPercent)));
   ui.rawPaneResizer.setAttribute("aria-valuenow", String(Math.round(rawPercent)));
 }
 
 function persistPaneLayout() {
   try { localStorage.setItem("docslaju-pane-ratios", JSON.stringify(paneRatios)); } catch (_) { /* optional */ }
+}
+
+function toggleWorkspacePane(kind) {
+  const panes = { document: ui.documentPane, rendered: ui.renderedPane, raw: ui.rawPane };
+  // Use the rendered pane state as the source of truth so a stale persisted
+  // value can never immediately re-minimize a panel the user just restored.
+  minimizedPanes[kind] = !panes[kind].classList.contains("is-minimized");
+  applyPaneLayout();
+  try { localStorage.setItem("docslaju-minimized-panes", JSON.stringify(minimizedPanes)); } catch (_) { /* optional */ }
 }
 
 function resizeWorkspacePane(kind, clientX) {
@@ -2390,6 +2420,9 @@ ui.themeToggle.addEventListener("click", () => {
 });
 makePaneResizer(ui.previewPaneResizer, "preview");
 makePaneResizer(ui.rawPaneResizer, "raw");
+ui.minimizeDocumentPane.addEventListener("click", () => toggleWorkspacePane("document"));
+ui.minimizeRenderedPane.addEventListener("click", () => toggleWorkspacePane("rendered"));
+ui.minimizeRawPane.addEventListener("click", () => toggleWorkspacePane("raw"));
 
 try {
   setSidebarCollapsed(localStorage.getItem("docslaju-sidebar-collapsed") === "true");
@@ -2398,6 +2431,14 @@ try {
     paneRatios = {
       preview: Math.max(0.24, Math.min(0.55, savedRatios.preview)),
       raw: Math.max(0.22, Math.min(0.48, savedRatios.raw)),
+    };
+  }
+  const savedMinimizedPanes = JSON.parse(localStorage.getItem("docslaju-minimized-panes") || "null");
+  if (savedMinimizedPanes) {
+    minimizedPanes = {
+      document: savedMinimizedPanes.document === true,
+      rendered: savedMinimizedPanes.rendered === true,
+      raw: savedMinimizedPanes.raw === true,
     };
   }
   workspaceView = localStorage.getItem("docslaju-workspace-view") === "structured" ? "structured" : "markdown";

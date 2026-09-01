@@ -538,6 +538,9 @@ def test_sidebar_exposes_projects_and_complete_session_menu():
             b'id="workflowStatus"',
             b'id="previewPaneResizer"',
             b'id="rawPaneResizer"',
+            b'id="minimizeDocumentPane"',
+            b'id="minimizeRenderedPane"',
+            b'id="minimizeRawPane"',
             b'id="structuredPane"',
             b'id="importDocumentType"',
             b'id="extractionProfile" type="search" role="combobox"',
@@ -587,10 +590,13 @@ def test_ui_uses_svg_icons_and_icon_only_middle_toolbar():
         assert b'function setWorkspaceView' in script.data
         assert b"function makePaneResizer" in script.data
         assert b"docslaju-pane-ratios" in script.data
+        assert b"docslaju-minimized-panes" in script.data
         assert b"docslaju-workspace-view" in script.data
         assert b"function setTheme" in script.data
         assert b"docslaju-theme" in script.data
         assert b".pane-resizer" in css.data
+        assert b".pane.is-minimized { min-width: 64px; }" in css.data
+        assert b".workspace-grid > .pane-editor { grid-column: 5; }" in css.data
         assert b".workflow-status" in css.data
         assert b'html[data-theme="dark"]' in css.data
         assert b'id="icon-moon"' in page.data
