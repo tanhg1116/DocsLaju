@@ -24,11 +24,18 @@ import {
   renderAccountingQueue as renderAccountingQueueUi,
   renderAccountingReview as renderAccountingReviewUi,
 } from "./modules/accounting-review.js";
+import { ocrRecoveryMessage } from "./modules/ocr-job-errors.js";
 
 const ui = {
   workspaceGrid: document.querySelector("#workspaceGrid"),
+  documentPane: document.querySelector("#documentPane"),
+  renderedPane: document.querySelector("#renderedPane"),
+  rawPane: document.querySelector("#rawPane"),
   previewPaneResizer: document.querySelector("#previewPaneResizer"),
   rawPaneResizer: document.querySelector("#rawPaneResizer"),
+  minimizeDocumentPane: document.querySelector("#minimizeDocumentPane"),
+  minimizeRenderedPane: document.querySelector("#minimizeRenderedPane"),
+  minimizeRawPane: document.querySelector("#minimizeRawPane"),
   workflowStatus: document.querySelector("#workflowStatus"),
   sessionList: document.querySelector("#sessionList"),
   projectList: document.querySelector("#projectList"),
@@ -772,8 +779,7 @@ function updateBatchControls(job) {
   ui.batchRecovery.hidden = !recoverable;
 
   if (recoverable) {
-    const count = (job.failed_pages || 0) + (job.cancelled_pages || 0);
-    ui.batchError.textContent = `${count} page${count === 1 ? "" : "s"} did not finish. Retry only those pages.`;
+    ui.batchError.textContent = ocrRecoveryMessage(job);
     ui.retryBatchButton.dataset.jobId = job.id;
   } else {
     delete ui.retryBatchButton.dataset.jobId;
@@ -2061,6 +2067,16 @@ function applyPaneLayout() {
   const rawPercent = Math.round(paneRatios.raw * 10000) / 100;
   ui.workspaceGrid.style.setProperty("--preview-pane", `${previewPercent}%`);
   ui.workspaceGrid.style.setProperty("--raw-pane", `${rawPercent}%`);
+  const paneControls = [
+    ["document", ui.documentPane, ui.minimizeDocumentPane, "PDF preview"],
+    ["rendered", ui.renderedPane, ui.minimizeRenderedPane, "rendered Markdown"],
+    ["raw", ui.rawPane, ui.minimizeRawPane, "raw Markdown"],
+  ];
+  for (const [kind, pane, button, label] of paneControls) {
+    const minimized = collapsedWorkspacePane === { document: 0, rendered: 1, raw: 2 }[kind];
+    button.setAttribute("aria-expanded", String(!minimized));
+    setIconButton(button, `${minimized ? "Restore" : "Minimize"} ${label}`, minimized ? "plus" : "minus");
+  }
   ui.previewPaneResizer.setAttribute("aria-valuenow", String(Math.round(previewPercent)));
   ui.rawPaneResizer.setAttribute("aria-valuenow", String(Math.round(rawPercent)));
   const structured = workspaceView === "structured";
@@ -2101,6 +2117,13 @@ function applyPaneLayout() {
 
 function persistPaneLayout() {
   try { localStorage.setItem("docslaju-pane-ratios", JSON.stringify(paneRatios)); } catch (_) { /* optional */ }
+}
+
+function toggleWorkspacePane(kind) {
+  const target = { document: 0, rendered: 1, raw: 2 }[kind];
+  collapsedWorkspacePane = collapsedWorkspacePane === target ? null : target;
+  expandedWorkspacePane = target === 0 ? 1 : target - 1;
+  applyPaneLayout();
 }
 
 function resizeWorkspacePane(kind, clientX) {
@@ -2653,6 +2676,9 @@ ui.themeToggle.addEventListener("click", () => {
 });
 makePaneResizer(ui.previewPaneResizer, "preview");
 makePaneResizer(ui.rawPaneResizer, "raw");
+ui.minimizeDocumentPane.addEventListener("click", () => toggleWorkspacePane("document"));
+ui.minimizeRenderedPane.addEventListener("click", () => toggleWorkspacePane("rendered"));
+ui.minimizeRawPane.addEventListener("click", () => toggleWorkspacePane("raw"));
 
 try {
   setSidebarCollapsed(localStorage.getItem("docslaju-sidebar-collapsed") === "true");
