@@ -13,6 +13,8 @@ from pathlib import Path
 from werkzeug.exceptions import BadRequest
 from werkzeug.utils import secure_filename
 
+from src.config import load_settings
+
 from src.mistral_client import OcrMarkdown, OcrPageResult, _fix_markdown_line_breaks
 from src.services.image_preprocessor import PreprocessedImage, preprocess_image
 
@@ -69,7 +71,7 @@ def pdf_page_image_for_ocr(content: bytes, page_number: int) -> PreprocessedImag
                 raise ValueError("Page is outside this document")
             page = pdf[page_number - 1]
             longest_points = max(float(page.rect.width), float(page.rect.height), 1.0)
-            scale = min(240.0 / 72.0, 3600.0 / longest_points)
+            scale = min(load_settings().pdf_ocr_dpi / 72.0, 3600.0 / longest_points)
             pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
             rendered = pixmap.tobytes("png")
     except Exception as exc:

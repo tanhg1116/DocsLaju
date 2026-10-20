@@ -1169,7 +1169,8 @@ def test_adaptive_rate_controller_increases_slowly_and_halves_on_429():
     assert fixed.throughput_pages_per_second is not None
 
 
-def test_adaptive_mode_does_not_guess_that_batch_is_faster():
+def test_adaptive_mode_does_not_guess_that_batch_is_faster(monkeypatch):
+    monkeypatch.setenv("OCR_BATCH_FORCE", "false")
     manager = OcrJobManager(batch_enabled=True, batch_min_pages=1)
 
     assert manager._choose_mode(1000, lambda *_args: None) == "realtime"

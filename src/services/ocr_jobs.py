@@ -397,7 +397,7 @@ class OcrJobManager:
         """
         if not self.batch_enabled or batch_processor is None:
             return "realtime"
-        if os.getenv("OCR_BATCH_FORCE", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        if os.getenv("OCR_BATCH_FORCE", "true").strip().lower() in {"1", "true", "yes", "on"}:
             return "batch"
         latency = self.rate_controller.latency_ewma or 5.0
         calculated_realtime_rate = min(
