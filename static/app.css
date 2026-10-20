@@ -623,6 +623,23 @@ h1 { color: #15202b; font-size: 27px; }
 .pane-resizer:hover::after, .pane-resizer:focus-visible::after { background: #635bff; box-shadow: 0 0 0 3px #e9e7ff; }
 .pane-resizer:focus-visible { outline: 0; }
 body.resizing-panes { cursor: col-resize; user-select: none; }
+.pane-resizer { min-width: 28px; }
+.pane-resizer::after { left: 13px; }
+.pane-collapse-button {
+  position: absolute; left: 0; width: 28px; height: 32px; padding: 4px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel); color: inherit; cursor: pointer;
+}
+.pane-collapse-top { top: 8px; }
+.pane-collapse-bottom { bottom: 8px; }
+.pane-collapse-button .ui-icon { width: 18px; height: 18px; }
+.pane-collapse-button:hover { color: #635bff; border-color: currentColor; }
+.pane-collapse-button:focus-visible { outline: 2px solid #918af5; outline-offset: 2px; }
+@media (min-width: 821px) {
+  .workspace-grid > .pane { min-width: 0; }
+  .workspace-grid > .pane.pane-collapsed { display: none; }
+}
 .pane { border-color: #d8dfe8; border-radius: 15px; background: #fff; box-shadow: 0 8px 28px rgba(35,48,65,.07); }
 .pane-title { position: sticky; top: 0; z-index: 5; min-height: 76px; padding: 16px 18px; border-bottom-color: #e0e5ec; background: rgba(255,255,255,.96); backdrop-filter: blur(8px); }
 .pane-title h2 { color: #1c2936; font-size: 17px; }

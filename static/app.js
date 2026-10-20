@@ -188,6 +188,8 @@ let currentExtractionLayout = null;
 let extractionEditMode = false;
 let workspaceView = "markdown";
 let paneRatios = { preview: 0.34, raw: 0.33 };
+let collapsedWorkspacePane = null;
+let expandedWorkspacePane = null;
 const expandedProjects = new Set();
 
 async function api(url, options = {}) {
@@ -2039,6 +2041,7 @@ async function loadExtractionForTemplate() {
 }
 
 function setWorkspaceView(view) {
+  collapsedWorkspacePane = null;
   workspaceView = view === "structured" ? "structured" : "markdown";
   const structured = workspaceView === "structured";
   document.querySelector(".pane-rendered").hidden = structured;
@@ -2060,6 +2063,40 @@ function applyPaneLayout() {
   ui.workspaceGrid.style.setProperty("--raw-pane", `${rawPercent}%`);
   ui.previewPaneResizer.setAttribute("aria-valuenow", String(Math.round(previewPercent)));
   ui.rawPaneResizer.setAttribute("aria-valuenow", String(Math.round(rawPercent)));
+  const structured = workspaceView === "structured";
+  const panes = [document.querySelector(".pane-document"),
+    structured ? ui.structuredPane : document.querySelector(".pane-rendered"),
+    document.querySelector(".pane-editor")];
+  panes.forEach((pane, index) => {
+    pane.classList.toggle("pane-collapsed", index === collapsedWorkspacePane);
+    pane.style.gridColumn = String(index * 2 + 1);
+    pane.style.gridRow = "1";
+  });
+  ui.previewPaneResizer.style.gridColumn = "2";
+  ui.previewPaneResizer.style.gridRow = "1";
+  ui.rawPaneResizer.style.gridColumn = "4";
+  ui.rawPaneResizer.style.gridRow = "1";
+  // Fractional tracks share only the available space after divider/gap widths.
+  const weights = structured
+    ? [paneRatios.preview, 1 - paneRatios.preview]
+    : [paneRatios.preview, Math.max(0.12, 1 - paneRatios.preview - paneRatios.raw), paneRatios.raw];
+  if (collapsedWorkspacePane !== null) {
+    const receiver = expandedWorkspacePane;
+    weights[receiver] += weights[collapsedWorkspacePane];
+    weights[collapsedWorkspacePane] = 0;
+  }
+  ui.workspaceGrid.style.gridTemplateColumns = weights.map((weight) =>
+    weight === 0 ? "0px" : `minmax(0, ${Number(weight.toFixed(4))}fr)`
+  ).join(" 28px ");
+  document.querySelectorAll(".pane-collapse-button").forEach((button) => {
+    const target = Number(button.dataset.paneTarget);
+    const restored = target === collapsedWorkspacePane;
+    const names = structured ? ["document preview", "structured output"] : ["document preview", "rendered Markdown", "raw Markdown"];
+    const label = `${restored ? "Restore" : "Minimize"} ${names[target]}`;
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-expanded", String(!restored));
+  });
 }
 
 function persistPaneLayout() {
@@ -2067,6 +2104,7 @@ function persistPaneLayout() {
 }
 
 function resizeWorkspacePane(kind, clientX) {
+  collapsedWorkspacePane = null;
   const bounds = ui.workspaceGrid.getBoundingClientRect();
   if (bounds.width < 900) return;
   const position = Math.max(0, Math.min(bounds.width, clientX - bounds.left));
@@ -2079,6 +2117,24 @@ function resizeWorkspacePane(kind, clientX) {
 }
 
 function makePaneResizer(element, kind) {
+  const left = kind === "preview" ? 0 : 1;
+  [left, left + 1].forEach((target, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `pane-collapse-button pane-collapse-${index ? "bottom" : "top"}`;
+    button.dataset.paneTarget = String(target);
+    button.innerHTML = `<svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-${index ? "right" : "left"}"></use></svg>`;
+    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("keydown", (event) => event.stopPropagation());
+    button.addEventListener("dblclick", (event) => event.stopPropagation());
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      collapsedWorkspacePane = collapsedWorkspacePane === target ? null : target;
+      expandedWorkspacePane = index ? left : left + 1;
+      applyPaneLayout();
+    });
+    element.append(button);
+  });
   element.addEventListener("pointerdown", (event) => {
     if (workspaceView === "structured" && kind === "raw") return;
     event.preventDefault();
@@ -2106,6 +2162,7 @@ function makePaneResizer(element, kind) {
     persistPaneLayout();
   });
   element.addEventListener("dblclick", () => {
+    collapsedWorkspacePane = null;
     paneRatios = { preview: 0.34, raw: 0.33 };
     applyPaneLayout();
     persistPaneLayout();
